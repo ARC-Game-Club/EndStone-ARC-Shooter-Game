@@ -118,7 +118,7 @@ class ARCShooterGamePlugin(Plugin):
 
     def __init__(self):
         super().__init__()
-        self.config: Optional[ConfigStore] = None
+        self.config_store: Optional[ConfigStore] = None
         self.language_manager: Optional[LanguageManager] = None
         self.instances: Dict[str, MapInstance] = {}
         self.player_to_map: Dict[str, str] = {}
@@ -143,8 +143,8 @@ class ARCShooterGamePlugin(Plugin):
         return self.language_manager.GetText(key)
 
     def on_load(self) -> None:
-        self.config = ConfigStore(logger=getattr(self, "logger", None))
-        lang = self.config.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
+        self.config_store = ConfigStore(logger=getattr(self, "logger", None))
+        lang = self.config_store.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
         self.language_manager = LanguageManager(lang)
         self._rebuild_instances()
         self._safe_log("info", "[ARCShooterGame] on_load")
@@ -172,8 +172,8 @@ class ARCShooterGamePlugin(Plugin):
         self._safe_log("info", "[ARCShooterGame] disabled")
 
     def _rebuild_instances(self) -> None:
-        assert self.config is not None
-        maps = self.config.maps
+        assert self.config_store is not None
+        maps = self.config_store.maps
         for map_id, inst in list(self.instances.items()):
             if map_id not in maps:
                 if inst.state == STATE_IDLE:
@@ -220,9 +220,9 @@ class ARCShooterGamePlugin(Plugin):
                 sender.send_message(self._t("CMD_NO_PERMISSION"))
                 return True
             try:
-                assert self.config is not None
-                self.config.reload()
-                lang = self.config.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
+                assert self.config_store is not None
+                self.config_store.reload()
+                lang = self.config_store.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
                 self.language_manager = LanguageManager(lang)
                 self._rebuild_instances()
                 sender.send_message(self._t("RELOAD_OK"))
@@ -319,7 +319,7 @@ class ARCShooterGamePlugin(Plugin):
             killer_name = None
         ps = inst.players.get(victim_name)
         if killer_name and self._instance_of(killer_name) is inst:
-            result = inst.apply_player_kill(killer_name, victim_name, self.config.kill_reward())
+            result = inst.apply_player_kill(killer_name, victim_name, self.config_store.kill_reward())
             if result:
                 killer = self._get_player(killer_name)
                 if killer:
@@ -378,7 +378,7 @@ class ARCShooterGamePlugin(Plugin):
     def _on_tick(self) -> None:
         try:
             now = time.time()
-            timeout = self.config.lobby_timeout() if self.config else 900
+            timeout = self.config_store.lobby_timeout() if self.config_store else 900
             for inst in list(self.instances.values()):
                 if inst.state == STATE_LOBBY and inst.lobby_timed_out(timeout, now):
                     self._dissolve_lobby(inst, timeout=True)
@@ -418,19 +418,19 @@ class ARCShooterGamePlugin(Plugin):
     # ---------- match flow ----------
 
     def _join_map(self, player: Player, map_id: str) -> None:
-        assert self.config is not None
+        assert self.config_store is not None
         if self._instance_of(player.name) is not None:
             player.send_message(self._t("JOIN_FAIL_IN_GAME"))
             return
         inst = self.instances.get(map_id)
-        cfg = self.config.maps.get(map_id)
+        cfg = self.config_store.maps.get(map_id)
         if inst is None or cfg is None:
             player.send_message(self._t("JOIN_FAIL_UNKNOWN"))
             return
         if cfg.get("mode") not in IMPLEMENTED_MODES:
             player.send_message(self._t("JOIN_FAIL_MODE"))
             return
-        ok, reason = inst.join(player.name, self.config.starting_points())
+        ok, reason = inst.join(player.name, self.config_store.starting_points())
         if not ok:
             player.send_message(self._t("JOIN_FAIL_PLAYING" if reason == "playing" else "JOIN_FAIL_FULL"))
             return
@@ -499,8 +499,8 @@ class ARCShooterGamePlugin(Plugin):
         if not ok:
             player.send_message(self._t("START_NEED_SPAWNS" if reason == "need_spawns" else "START_NEED_PLAYERS"))
             return
-        buy_seconds = self.config.buy_time() if self.config else 10
-        starting = self.config.starting_points() if self.config else 800
+        buy_seconds = self.config_store.buy_time() if self.config_store else 10
+        starting = self.config_store.starting_points() if self.config_store else 800
         for ps in inst.online_players():
             ps.points = starting
             ps.kills = 0
@@ -685,7 +685,7 @@ class ARCShooterGamePlugin(Plugin):
         return self._t("MAP_STATUS_PLAYING")
 
     def _lobby_remaining_text(self, inst: MapInstance) -> str:
-        timeout = self.config.lobby_timeout() if self.config else 900
+        timeout = self.config_store.lobby_timeout() if self.config_store else 900
         remain = max(0, int(timeout - (time.time() - inst.lobby_started_at)))
         minutes, seconds = divmod(remain, 60)
         return f"{minutes:02d}:{seconds:02d}"
@@ -703,12 +703,12 @@ class ARCShooterGamePlugin(Plugin):
     # ---------- shop ----------
 
     def _buy_weapon(self, player: Player, weapon_id: str) -> None:
-        assert self.config is not None
+        assert self.config_store is not None
         inst = self._instance_of(player.name)
         if inst is None or inst.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
-        weapon = self.config.weapons.get(weapon_id)
+        weapon = self.config_store.weapons.get(weapon_id)
         if weapon is None:
             player.send_message(self._t("BUY_FAIL_UNKNOWN"))
             return
@@ -720,7 +720,7 @@ class ARCShooterGamePlugin(Plugin):
             player.send_message(self._t("BUY_FAIL_POINTS").format(cost, ps.points))
             self._show_shop_category(player, weapon["type"])
             return
-        layout = self.config.layout()
+        layout = self.config_store.layout()
         start, end = slot_range(layout, weapon["type"])
         capacity = end - start
         if capacity <= 0:
@@ -728,8 +728,8 @@ class ARCShooterGamePlugin(Plugin):
             return
         idx, old_id = inst.record_purchase(player.name, weapon, capacity)
         ps.points -= cost
-        if old_id and old_id in self.config.weapons:
-            old = self.config.weapons[old_id]
+        if old_id and old_id in self.config_store.weapons:
+            old = self.config_store.weapons[old_id]
             for extra_id, extra_count in (old.get("extras") or {}).items():
                 remove_item_count(player, extra_id, extra_count)
         slot = start + idx
@@ -892,7 +892,7 @@ class ARCShooterGamePlugin(Plugin):
         ps = inst.players.get(player.name)
         if ps is None:
             return
-        layout = self.config.layout() if self.config else {}
+        layout = self.config_store.layout() if self.config_store else {}
         p0, p1 = slot_range(layout, "primary")
         s0, s1 = slot_range(layout, "secondary")
         g0, g1 = slot_range(layout, "gadget")
@@ -912,14 +912,14 @@ class ARCShooterGamePlugin(Plugin):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
         ps = inst.players.get(player.name)
-        if ps is None or self.config is None:
+        if ps is None or self.config_store is None:
             return
         title_map = {
             "primary": self._t("SHOP_PRIMARY"),
             "secondary": self._t("SHOP_SECONDARY"),
             "gadget": self._t("SHOP_GADGET"),
         }
-        weapons = self.config.weapons_of_type(weapon_type)
+        weapons = self.config_store.weapons_of_type(weapon_type)
         form = ActionForm(
             title=self._t("SHOP_CAT_TITLE").format(title_map.get(weapon_type, weapon_type)),
             content=self._t("SHOP_CAT_CONTENT").format(ps.points),

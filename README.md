@@ -1,6 +1,6 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.1.0-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.1.1-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，地图配置里预留了个人死斗、夺旗战等 `mode`，后续按同样大厅流程加即可。
@@ -12,7 +12,7 @@ pip install build
 python -m build
 ```
 
-把 `dist/endstone_arc_shooter_game-0.1.0-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
+把 `dist/endstone_arc_shooter_game-0.1.1-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
 
 ```
 plugins/ARCShooterGame/

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "endstone_arc_shooter_game"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = []
 authors = [
     { name = "DEVILENMO", email = "DEVILENMO@gmail.com" },
@@ -20,3 +20,4 @@ Issues = "https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game/issues"
 
 [project.entry-points."endstone"]
 arc_shooter_game = "endstone_arc_shooter_game:ARCShooterGamePlugin"
+
