@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endstone_arc_shooter_game"
+version = "0.1.0"
+dependencies = []
+authors = [
+    { name = "DEVILENMO", email = "DEVILENMO@gmail.com" },
+]
+description = "Generic shooting-game plugin for EndStone: maps, TDM lobby, weapon shop."
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["endstone", "plugin", "tdm", "shooter", "minecraft", "bedrock"]
+
+[project.urls]
+Homepage = "https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game"
+Issues = "https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game/issues"
+
+[project.entry-points."endstone"]
+arc_shooter_game = "endstone_arc_shooter_game:ARCShooterGamePlugin"
