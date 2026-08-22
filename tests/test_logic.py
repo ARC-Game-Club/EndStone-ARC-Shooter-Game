@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import json
 import math
 import unittest
+from pathlib import Path
 
 from endstone_arc_shooter_game.config import (
     ConfigStore,
@@ -166,6 +168,16 @@ class ConfigValidateTests(unittest.TestCase):
         self.assertEqual(weapon["default_ammo"], 30)
         plain = normalize_weapon({"id": "iron_sword", "item": "minecraft:iron_sword", "type": "secondary", "cost": 100})
         self.assertNotIn("ammo_scoreboard", plain)
+
+    def test_weapons_json_matches_aplok_ammo(self):
+        root = Path(__file__).resolve().parents[1]
+        ammo_ref = json.loads((root / "plugins/ARCShooterGame/aplok_ammo.json").read_text(encoding="utf-8"))
+        weapons = json.loads((root / "plugins/ARCShooterGame/weapons.json").read_text(encoding="utf-8"))
+        by_id = {w["id"]: w for w in weapons["weapons"]}
+        for wid, spec in ammo_ref["weapons"].items():
+            weapon = by_id[wid]
+            self.assertEqual(weapon["ammo_scoreboard"], spec["ammo_scoreboard"], wid)
+            self.assertEqual(weapon["default_ammo"], spec["default_ammo"], wid)
 
     def test_reject_bad_weapon_type(self):
         errors = validate_weapon({"id": "x", "item": "minecraft:stick", "type": "ultimate"})

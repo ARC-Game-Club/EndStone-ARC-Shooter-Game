@@ -98,6 +98,15 @@ MATCH_MONEY_PER_KD=100
 
 `type` 为 `primary` / `secondary` / `gadget`。`item` 填 `namespace:identifier`。
 
+枪械需与 Aplok 模组计分板一致（购买/重生时写入弹药数）：
+
+| 字段 | 说明 |
+|---|---|
+| `ammo_scoreboard` | 模组使用的计分板 objective 名（通常与枪 id 相同） |
+| `default_ammo` | 满弹匣弹药数（取自模组 `functions/weapons/reload/*.mcfunction`） |
+
+可用 `python scripts/sync_ammo_from_mod.py` 从枪战服行为包自动同步；参考表见 `plugins/ARCShooterGame/aplok_ammo.json`。
+
 ## 本地测试（不需要 Endstone）
 
 ```bash

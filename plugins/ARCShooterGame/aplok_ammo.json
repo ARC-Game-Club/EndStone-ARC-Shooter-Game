@@ -1,0 +1,74 @@
+{
+  "_comment": "从 Aplok 枪械 BP reload 函数自动提取；运行 scripts/sync_ammo_from_mod.py 更新",
+  "_source": "Aplok枪械BP/functions/weapons/reload",
+  "weapons": {
+    "ak12": {
+      "ammo_scoreboard": "ak12",
+      "default_ammo": 30
+    },
+    "ak47": {
+      "ammo_scoreboard": "ak47",
+      "default_ammo": 30
+    },
+    "ak74": {
+      "ammo_scoreboard": "ak74",
+      "default_ammo": 30
+    },
+    "akm": {
+      "ammo_scoreboard": "akm",
+      "default_ammo": 30
+    },
+    "aks74u": {
+      "ammo_scoreboard": "aks74u",
+      "default_ammo": 30
+    },
+    "awp": {
+      "ammo_scoreboard": "awp",
+      "default_ammo": 10
+    },
+    "deagle": {
+      "ammo_scoreboard": "deagle",
+      "default_ammo": 10
+    },
+    "fnfal": {
+      "ammo_scoreboard": "fnfal",
+      "default_ammo": 20
+    },
+    "glock17": {
+      "ammo_scoreboard": "glock17",
+      "default_ammo": 17
+    },
+    "glock18": {
+      "ammo_scoreboard": "glock18",
+      "default_ammo": 17
+    },
+    "m1014": {
+      "ammo_scoreboard": "m1014",
+      "default_ammo": 7
+    },
+    "m249": {
+      "ammo_scoreboard": "m249",
+      "default_ammo": 200
+    },
+    "m4a1": {
+      "ammo_scoreboard": "m4a1",
+      "default_ammo": 30
+    },
+    "mossberg": {
+      "ammo_scoreboard": "mossberg",
+      "default_ammo": 6
+    },
+    "mp5a5": {
+      "ammo_scoreboard": "mp5a5",
+      "default_ammo": 30
+    },
+    "parafal": {
+      "ammo_scoreboard": "parafal",
+      "default_ammo": 20
+    },
+    "rpg7": {
+      "ammo_scoreboard": "rpg7",
+      "default_ammo": 1
+    }
+  }
+}
