@@ -1,9 +1,9 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.1.1-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.2.2-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
-服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，地图配置里预留了个人死斗、夺旗战等 `mode`，后续按同样大厅流程加即可。
+服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
 
 ## 安装
 
@@ -12,12 +12,12 @@ pip install build
 python -m build
 ```
 
-把 `dist/endstone_arc_shooter_game-0.1.1-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
+把 `dist/endstone_arc_shooter_game-0.2.2-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
 
 ```
 plugins/ARCShooterGame/
+  shooter.db
   settings.yml
-  maps.json
   weapons.json
   ZH-CN.txt
 ```
@@ -26,23 +26,32 @@ plugins/ARCShooterGame/
 
 | 指令 | 说明 |
 |---|---|
-| `/tdm` | 地图列表 / 大厅 / 比赛菜单 |
-| `/tdm buy` | 比赛开始后打开商店 |
-| `/tdm leave` | 离开大厅或比赛 |
-| `/tdm reload` | OP：重载地图、武器、设置 |
-| `/tdm here` | OP：输出当前坐标，方便填 `maps.json` |
+| `/gs` | 主菜单：大厅列表 / 配置地图（OP） |
+| `/gs buy` | 比赛开始后打开商店 |
+| `/gs leave` | 离开大厅或比赛 |
+| `/gs reload` | OP：重载地图、武器、设置 |
 
 ## 流程
 
-1. 玩家 `/tdm` 看到每张地图的人数与状态，点进去加入**虚拟大厅**（此时不传送、不清背包）。
-2. 第一个进入某地图的人成为大厅管理员，可调整分队、踢人、开始游戏。
-3. 从首位玩家加入起计时，默认 **15 分钟**未开局则解散该地图大厅。
-4. 开局后：备份背包与位置 → 清空背包 → 冒险模式 → 按队伍随机传送到出生点。
-5. 默认 **10 秒**购买时间，期间（以及整场比赛）可用 `/tdm buy` 花战争点数买武器。
+1. 玩家 `/gs` → **大厅列表**，可创建或加入大厅。
+2. 房主在大厅内选择地图和游戏模式（仅显示已配置完成、且未被其它大厅占用的地图）。
+3. 从首位玩家加入起计时，默认 **15 分钟**未开局则解散大厅。
+4. 开局后：备份背包与位置 → `/clear` 清空背包 → `/gamemode 0` 生存模式 → 按队伍随机传送到出生点。
+5. 默认 **10 秒**购买时间，期间（以及整场比赛）可用 `/gs buy` 花战争点数买武器。
 6. 击杀敌对玩家：队伍 +1 分，杀手获得战争点数；误杀队友：队伍 -1 分（不低于 0）。
-7. 先达到地图 `target_score` 的队伍获胜。结算后所有人回到开局前位置并恢复背包，聊天输出胜者与各人击杀/死亡。
+7. 先达到目标分数的队伍获胜。结算后 `/clear` 清空比赛背包，并传送回开局前位置、恢复原先游戏模式。
+8. 比赛进行中若未满员，其他玩家仍可从大厅列表加入。
 
-死亡不掉落，并在己方出生点重生。中途掉线或崩溃时，背包备份写在 `plugins/ARCShooterGame/backups/`，下次进服会尝试还原。
+离开地图区域会被传送回复活点。死亡不掉落，并在己方出生点重生。
+
+## OP 配置地图
+
+`/gs` → **配置地图**：
+
+1. 创建地图（输入名称）
+2. 站在角落点按钮 **设为角点1 / 角点2** 划定 XYZ 区域
+3. **添加游戏模式**（目前仅团队死斗可实装）
+4. 进入模式配置：站位添加红/蓝队复活点，可修改目标分数与单队人数上限
 
 ## 设置 `settings.yml`
 
@@ -50,20 +59,18 @@ plugins/ARCShooterGame/
 PRIMARY_WEAPON_SLOTS=1
 SECONDARY_WEAPON_SLOTS=1
 GADGET_SLOTS=3
-STARTING_POINTS=800
-KILL_REWARD_POINTS=100
+STARTING_POINTS=1000
+KILL_REWARD_POINTS=50
 LOBBY_TIMEOUT_SECONDS=900
 BUY_TIME_SECONDS=10
 DEFAULT_LANGUAGE_CODE=ZH-CN
 ```
 
-热键栏布局：主武器占前 n 格，副武器接着，道具再接着。换同类型武器会替换对应格子；子弹等 `extras` 放到背包末尾。道具默认 3 格，买第 4 个时替换第 1 个道具格。
+## 地图数据
 
-## 地图 `maps.json`
+地图配置存储在 `plugins/ARCShooterGame/shooter.db`（SQLite）。OP 通过 `/gs` 配置界面修改，无需手改 JSON。
 
-`mode` 目前只有 `tdm` 能开局。每个队可配多个出生点，`radius` 为 0 表示精确出生在该点。
-
-用 `/tdm here` 站在出生点上，把打印的 JSON 贴进 `spawns`。改完 `/tdm reload`。
+若服务器上仍有旧的 `maps.json`，首次启动会自动迁移到 SQLite 并备份为 `maps.json.bak`。
 
 ## 武器 `weapons.json`
 

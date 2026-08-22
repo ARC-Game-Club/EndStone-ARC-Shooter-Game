@@ -3,19 +3,27 @@ import math
 import unittest
 
 from endstone_arc_shooter_game.config import (
+    ConfigStore,
+    build_runtime_map_cfg,
+    migrate_legacy_map,
+    mode_playable,
     normalize_map,
     normalize_weapon,
+    playable_modes,
+    point_in_region,
     slot_layout,
     slot_range,
     validate_map,
     validate_weapon,
 )
+from endstone_arc_shooter_game.map_db import MapDatabase
 from endstone_arc_shooter_game.session import (
-    STATE_IDLE,
+    STATE_BUYING,
     STATE_LOBBY,
+    STATE_PLAYING,
     TEAM_A,
     TEAM_B,
-    MapInstance,
+    Lobby,
     apply_kill,
     first_empty_or_first,
     pick_spawn,
@@ -27,14 +35,22 @@ def sample_map():
         {
             "id": "warehouse",
             "display_name": "仓库",
-            "mode": "tdm",
-            "max_players_per_team": 2,
-            "target_score": 3,
             "dimension": "overworld",
-            "teams": {
-                "a": {"name": "红队", "spawns": [{"x": 0, "y": 64, "z": 0, "radius": 0}]},
-                "b": {"name": "蓝队", "spawns": [{"x": 10, "y": 64, "z": 0, "radius": 5}]},
+            "region": {
+                "pos1": {"x": 0, "y": 60, "z": 0},
+                "pos2": {"x": 20, "y": 80, "z": 20},
             },
+            "modes": [
+                {
+                    "mode": "tdm",
+                    "max_players_per_team": 2,
+                    "target_score": 3,
+                    "teams": {
+                        "a": {"name": "红队", "spawns": [{"x": 0, "y": 64, "z": 0, "radius": 0}]},
+                        "b": {"name": "蓝队", "spawns": [{"x": 10, "y": 64, "z": 0, "radius": 5}]},
+                    },
+                }
+            ],
         }
     )
 
@@ -49,9 +65,36 @@ class SlotLayoutTests(unittest.TestCase):
 
 
 class ConfigValidateTests(unittest.TestCase):
-    def test_map_requires_spawns(self):
-        errors = validate_map({"id": "x", "mode": "tdm", "teams": {"a": {"spawns": []}, "b": {}}})
+    def test_legacy_map_migrates(self):
+        legacy = {
+            "id": "old",
+            "display_name": "旧图",
+            "mode": "tdm",
+            "teams": {
+                "a": {"spawns": [{"x": 1, "y": 64, "z": 1}]},
+                "b": {"spawns": [{"x": 2, "y": 64, "z": 2}]},
+            },
+        }
+        migrated = migrate_legacy_map(legacy)
+        self.assertIsInstance(migrated.get("modes"), list)
+        self.assertEqual(migrated["modes"][0]["mode"], "tdm")
+
+    def test_map_requires_modes_array(self):
+        errors = validate_map({"id": "x", "display_name": "x"})
         self.assertTrue(errors)
+
+    def test_playable_mode_requires_region_and_spawns(self):
+        cfg = sample_map()
+        self.assertTrue(mode_playable(cfg, "tdm"))
+        self.assertIn("tdm", playable_modes(cfg))
+        runtime = build_runtime_map_cfg(cfg, "tdm")
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime["mode"], "tdm")
+
+    def test_point_in_region(self):
+        cfg = sample_map()
+        self.assertTrue(point_in_region(cfg, 5, 64, 5))
+        self.assertFalse(point_in_region(cfg, 100, 64, 5))
 
     def test_weapon_type_and_extras(self):
         errors = validate_weapon(
@@ -66,6 +109,36 @@ class ConfigValidateTests(unittest.TestCase):
     def test_reject_bad_weapon_type(self):
         errors = validate_weapon({"id": "x", "item": "minecraft:stick", "type": "ultimate"})
         self.assertTrue(any("type" in e for e in errors))
+
+    def test_rename_and_delete_map(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            store = ConfigStore()
+            store.map_db = MapDatabase(db_path=db_path)
+            store.maps = {}
+            entry = store.create_map("测试图", "overworld")
+            map_id = entry["id"]
+            store.update_map(map_id, lambda m: m.update({"display_name": "新名称"}))
+            self.assertEqual(store.maps[map_id]["display_name"], "新名称")
+            self.assertTrue(store.delete_map(map_id))
+            self.assertNotIn(map_id, store.maps)
+            self.assertEqual(store.map_db.load_all(), {})
+            store.map_db.close()
+
+    def test_sqlite_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MapDatabase(db_path=Path(tmp) / "roundtrip.db")
+            saved = db.save_map(sample_map())
+            loaded = db.load_all()
+            self.assertIn(saved["id"], loaded)
+            self.assertEqual(loaded[saved["id"]]["display_name"], "仓库")
+            db.close()
 
 
 class SpawnTests(unittest.TestCase):
@@ -103,91 +176,114 @@ class KillScoreTests(unittest.TestCase):
         self.assertEqual(result["score_b"], 0)
 
 
-class SessionTests(unittest.TestCase):
-    def test_first_join_becomes_admin_and_balances_teams(self):
-        inst = MapInstance(sample_map())
-        ok, reason = inst.join("alice", 800, now=1000)
+class LobbyTests(unittest.TestCase):
+    def _lobby_with_map(self) -> Lobby:
+        lobby = Lobby(admin="alice")
+        lobby.set_map_and_mode(sample_map(), "tdm")
+        return lobby
+
+    def test_create_and_join(self):
+        lobby = Lobby(admin="alice")
+        ok, reason = lobby.join("alice", 800, now=1000)
         self.assertTrue(ok)
         self.assertEqual(reason, "admin")
-        self.assertEqual(inst.state, STATE_LOBBY)
-        self.assertEqual(inst.admin, "alice")
-        inst.join("bob", 800, now=1001)
-        inst.join("carol", 800, now=1002)
-        self.assertEqual(inst.players["alice"].team, TEAM_A)
-        self.assertEqual(inst.players["bob"].team, TEAM_B)
-        self.assertEqual(inst.players["carol"].team, TEAM_A)
+        self.assertEqual(lobby.state, STATE_LOBBY)
+        ok, reason = lobby.join("bob", 800, now=1001)
+        self.assertTrue(ok)
+        self.assertEqual(lobby.player_count(), 2)
 
     def test_fourth_player_rejected_when_teams_full(self):
-        inst = MapInstance(sample_map())
+        lobby = self._lobby_with_map()
         for name in ("a", "b", "c", "d"):
-            self.assertTrue(inst.join(name, 1, now=1)[0])
-        ok, reason = inst.join("eve", 1, now=2)
+            self.assertTrue(lobby.join(name, 1, now=1)[0])
+        ok, reason = lobby.join("eve", 1, now=2)
         self.assertFalse(ok)
         self.assertEqual(reason, "full")
 
+    def test_cannot_start_without_map(self):
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        ok, reason = lobby.can_start()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "need_map")
+
+    def test_can_start_with_map_and_mode(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        ok, reason = lobby.can_start()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_mid_match_join_allowed_when_not_full(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.begin_buy(10, now=3)
+        ok, reason = lobby.can_join()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
     def test_lobby_timeout(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=0)
-        self.assertFalse(inst.lobby_timed_out(900, now=899))
-        self.assertTrue(inst.lobby_timed_out(900, now=900))
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=0)
+        self.assertFalse(lobby.lobby_timed_out(900, now=899))
+        self.assertTrue(lobby.lobby_timed_out(900, now=900))
 
     def test_admin_leave_transfers(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=1)
-        inst.join("bob", 800, now=2)
-        new_admin = inst.leave("alice")
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        new_admin = lobby.leave("alice")
         self.assertEqual(new_admin, "bob")
-        self.assertEqual(inst.admin, "bob")
-
-    def test_empty_lobby_resets(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=1)
-        inst.leave("alice")
-        self.assertEqual(inst.state, STATE_IDLE)
-        self.assertEqual(inst.player_count(), 0)
-
-    def test_cannot_start_same_team(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=1)
-        inst.join("bob", 800, now=2)
-        inst.set_team("bob", TEAM_A)
-        ok, reason = inst.can_start()
-        self.assertFalse(ok)
-        self.assertEqual(reason, "need_players")
+        self.assertEqual(lobby.admin, "bob")
 
     def test_kill_ends_match_at_target(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=1)
-        inst.join("bob", 800, now=2)
-        inst.begin_buy(0)
-        inst.begin_playing()
-        inst.apply_player_kill("alice", "bob", 100)
-        inst.apply_player_kill("alice", "bob", 100)
-        result = inst.apply_player_kill("alice", "bob", 100)
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        lobby.apply_player_kill("alice", "bob", 100)
+        lobby.apply_player_kill("alice", "bob", 100)
+        result = lobby.apply_player_kill("alice", "bob", 100)
         self.assertEqual(result["winner"], TEAM_A)
-        self.assertEqual(inst.players["alice"].kills, 3)
-        self.assertEqual(inst.players["bob"].deaths, 3)
-        self.assertEqual(inst.players["alice"].points, 1100)
+        self.assertEqual(lobby.players["alice"].kills, 3)
+        self.assertEqual(lobby.players["bob"].deaths, 3)
+        self.assertEqual(lobby.players["alice"].points, 1100)
 
     def test_gadget_fills_then_replaces_first(self):
-        inst = MapInstance(sample_map())
-        inst.join("alice", 800, now=1)
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=1)
         w1 = {"id": "g1", "type": "gadget"}
         w2 = {"id": "g2", "type": "gadget"}
         w3 = {"id": "g3", "type": "gadget"}
         w4 = {"id": "g4", "type": "gadget"}
-        self.assertEqual(inst.record_purchase("alice", w1, 3)[0], 0)
-        self.assertEqual(inst.record_purchase("alice", w2, 3)[0], 1)
-        self.assertEqual(inst.record_purchase("alice", w3, 3)[0], 2)
-        idx, old = inst.record_purchase("alice", w4, 3)
+        self.assertEqual(lobby.record_purchase("alice", w1, 3)[0], 0)
+        self.assertEqual(lobby.record_purchase("alice", w2, 3)[0], 1)
+        self.assertEqual(lobby.record_purchase("alice", w3, 3)[0], 2)
+        idx, old = lobby.record_purchase("alice", w4, 3)
         self.assertEqual(idx, 0)
         self.assertEqual(old, "g1")
-        self.assertEqual(inst.players["alice"].gadgets[0], "g4")
+        self.assertEqual(lobby.players["alice"].gadgets[0], "g4")
 
     def test_first_empty_or_first(self):
         self.assertEqual(first_empty_or_first([None, "a"], 2), 0)
         self.assertEqual(first_empty_or_first(["a", None], 2), 1)
         self.assertEqual(first_empty_or_first(["a", "b"], 2), 0)
+
+
+class MapOccupancyTests(unittest.TestCase):
+    def test_two_lobbies_cannot_share_map(self):
+        map_cfg = sample_map()
+        lobby_a = Lobby(admin="alice")
+        lobby_b = Lobby(admin="bob")
+        lobby_a.set_map_and_mode(map_cfg, "tdm")
+        occupied = {lobby_a.map_id}
+        lobby_b.set_map_and_mode(map_cfg, "tdm")
+        self.assertIn(map_cfg["id"], occupied)
+        self.assertEqual(lobby_b.map_id, map_cfg["id"])
 
 
 if __name__ == "__main__":

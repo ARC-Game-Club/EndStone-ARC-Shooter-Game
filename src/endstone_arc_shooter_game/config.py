@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""地图、武器、全局设置。嵌套数据用 JSON；简单键值用 settings.yml。"""
+"""地图、武器、全局设置。地图用 SQLite；武器仍用 JSON；简单键值用 settings.yml。"""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 IMPLEMENTED_MODES = {"tdm"}
+KNOWN_MODES = ("tdm", "ffa", "ctf")
 WEAPON_TYPES = ("primary", "secondary", "gadget")
 
 DEFAULT_SETTINGS = {
@@ -16,103 +18,47 @@ DEFAULT_SETTINGS = {
     "PRIMARY_WEAPON_SLOTS": "1",
     "SECONDARY_WEAPON_SLOTS": "1",
     "GADGET_SLOTS": "3",
-    "STARTING_POINTS": "800",
-    "KILL_REWARD_POINTS": "100",
+    "STARTING_POINTS": "1000",
+    "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
     "BUY_TIME_SECONDS": "10",
 }
 
 DEFAULT_MAPS = {
-    "_comment": "复制并修改 id / 出生点。radius=0 表示精确出生在该坐标。mode 目前仅 tdm 可开局。",
-    "maps": [
-        {
-            "id": "example_tdm",
-            "display_name": "示例仓库",
-            "mode": "tdm",
-            "max_players_per_team": 8,
-            "target_score": 50,
-            "dimension": "overworld",
-            "teams": {
-                "a": {
-                    "name": "红队",
-                    "spawns": [{"x": 0, "y": 64, "z": 0, "radius": 0, "yaw": 0, "pitch": 0}],
-                },
-                "b": {
-                    "name": "蓝队",
-                    "spawns": [{"x": 20, "y": 64, "z": 0, "radius": 0, "yaw": 180, "pitch": 0}],
-                },
-            },
-        }
-    ],
+    "_comment": "已弃用：地图数据现存储在 shooter.db（SQLite）。首次启动若存在 maps.json 会自动迁移。",
+    "maps": [],
 }
 
 DEFAULT_WEAPONS = {
-    "_comment": "item 填 namespace:identifier。extras 为附属物品及数量，会发到背包末尾。",
+    "_comment": "起始 1000 可买普通主+副；击杀 +50 攒点买高级枪/道具。",
     "weapons": [
-        {
-            "id": "bow",
-            "display_name": "弓",
-            "item": "minecraft:bow",
-            "cost": 200,
-            "type": "primary",
-            "extras": {"minecraft:arrow": 32},
-        },
-        {
-            "id": "crossbow",
-            "display_name": "弩",
-            "item": "minecraft:crossbow",
-            "cost": 350,
-            "type": "primary",
-            "extras": {"minecraft:arrow": 24},
-        },
-        {
-            "id": "iron_sword",
-            "display_name": "铁剑",
-            "item": "minecraft:iron_sword",
-            "cost": 150,
-            "type": "secondary",
-            "extras": {},
-        },
-        {
-            "id": "shield",
-            "display_name": "盾牌",
-            "item": "minecraft:shield",
-            "cost": 120,
-            "type": "secondary",
-            "extras": {},
-        },
-        {
-            "id": "snowball",
-            "display_name": "雪球",
-            "item": "minecraft:snowball",
-            "cost": 50,
-            "type": "gadget",
-            "amount": 16,
-            "extras": {},
-        },
-        {
-            "id": "ender_pearl",
-            "display_name": "末影珍珠",
-            "item": "minecraft:ender_pearl",
-            "cost": 80,
-            "type": "gadget",
-            "amount": 8,
-            "extras": {},
-        },
-        {
-            "id": "golden_apple",
-            "display_name": "金苹果",
-            "item": "minecraft:golden_apple",
-            "cost": 100,
-            "type": "gadget",
-            "extras": {},
-        },
+        {"id": "mp5a5", "display_name": "HK MP5-A5 冲锋枪", "item": "trenbankai:mp5a5", "cost": 500, "type": "primary", "extras": {"trenbankai:mp5a5_mag": 3}},
+        {"id": "aks74u", "display_name": "AKS-74U 短突击步枪", "item": "trenbankai:aks74u", "cost": 550, "type": "primary", "extras": {"trenbankai:ak74_mag": 2}},
+        {"id": "m4a1", "display_name": "M4A1 卡宾枪", "item": "trenbankai:m4a1", "cost": 650, "type": "primary", "extras": {"trenbankai:m4a1_mag": 2}},
+        {"id": "ak74", "display_name": "AK-74 突击步枪", "item": "trenbankai:ak74", "cost": 650, "type": "primary", "extras": {"trenbankai:ak74_mag": 2}},
+        {"id": "ak12", "display_name": "AK-12 突击步枪", "item": "trenbankai:ak12", "cost": 700, "type": "primary", "extras": {"trenbankai:ak12_mag": 2}},
+        {"id": "mossberg", "display_name": "莫斯伯格 500 霰弹枪", "item": "trenbankai:mossberg", "cost": 700, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 12}},
+        {"id": "ak47", "display_name": "AK-47 突击步枪", "item": "trenbankai:ak47", "cost": 900, "type": "primary", "extras": {"trenbankai:ak47_mag": 2}},
+        {"id": "akm", "display_name": "AKM 突击步枪", "item": "trenbankai:akm", "cost": 900, "type": "primary", "extras": {"trenbankai:akm_mag": 2}},
+        {"id": "m1014", "display_name": "M1014 霰弹枪", "item": "trenbankai:m1014", "cost": 1000, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 14}},
+        {"id": "parafal", "display_name": "ParaFAL 战斗步枪", "item": "trenbankai:parafal", "cost": 1050, "type": "primary", "extras": {"trenbankai:fnfal_mag": 2}},
+        {"id": "fnfal", "display_name": "FN FAL 战斗步枪", "item": "trenbankai:fnfal", "cost": 1150, "type": "primary", "extras": {"trenbankai:fnfal_mag": 2}},
+        {"id": "m249", "display_name": "M249 轻机枪", "item": "trenbankai:m249", "cost": 1300, "type": "primary", "extras": {"trenbankai:m249_mag": 1}},
+        {"id": "awp", "display_name": "AWP 狙击步枪", "item": "trenbankai:awp", "cost": 1450, "type": "primary", "extras": {"trenbankai:awp_mag": 2}},
+        {"id": "rpg7", "display_name": "RPG-7 火箭筒", "item": "trenbankai:rpg7", "cost": 1500, "type": "primary", "extras": {"trenbankai:rpg7_rocket": 2}},
+        {"id": "glock17", "display_name": "格洛克 17", "item": "trenbankai:glock17", "cost": 300, "type": "secondary", "extras": {"trenbankai:glock_mag": 2}},
+        {"id": "glock18", "display_name": "格洛克 18c", "item": "trenbankai:glock18", "cost": 550, "type": "secondary", "extras": {"trenbankai:glock_mag": 2}},
+        {"id": "deagle", "display_name": "沙漠之鹰", "item": "trenbankai:deagle", "cost": 800, "type": "secondary", "extras": {"trenbankai:deagle_mag": 2}},
+        {"id": "flare", "display_name": "信号弹", "item": "trenbankai:flare", "cost": 250, "type": "gadget", "amount": 2, "extras": {}},
+        {"id": "m84_grenade", "display_name": "M84 闪光弹", "item": "trenbankai:m84_grenade", "cost": 350, "type": "gadget", "amount": 1, "extras": {}},
+        {"id": "mk2_grenade", "display_name": "Mk 2 手榴弹", "item": "trenbankai:mk2_grenade", "cost": 450, "type": "gadget", "amount": 1, "extras": {}},
+        {"id": "l83a1_grenade", "display_name": "L83A1 手榴弹", "item": "trenbankai:l83a1_grenade", "cost": 450, "type": "gadget", "amount": 1, "extras": {}},
+        {"id": "landmine", "display_name": "地雷", "item": "trenbankai:landmine_item", "cost": 550, "type": "gadget", "amount": 1, "extras": {}},
     ],
 }
 
 
 def slot_layout(primary: int, secondary: int, gadget: int) -> Dict[str, Any]:
-    """主武器占用热键栏前 n 格，副武器接着，道具再接着。附属物品从背包末尾向前放。"""
     primary = max(0, int(primary))
     secondary = max(0, int(secondary))
     gadget = max(0, int(gadget))
@@ -131,32 +77,213 @@ def slot_range(layout: Dict[str, Any], weapon_type: str) -> Tuple[int, int]:
     return layout.get(weapon_type, (0, 0))
 
 
+def slugify_map_id(name: str) -> str:
+    raw = str(name or "").strip().lower()
+    raw = re.sub(r"[^\w\u4e00-\u9fff]+", "_", raw, flags=re.UNICODE)
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    return raw or "map"
+
+
+def _has_xyz(point: Any) -> bool:
+    if not isinstance(point, dict):
+        return False
+    try:
+        float(point["x"])
+        float(point["y"])
+        float(point["z"])
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _normalize_point(point: Any) -> Optional[Dict[str, float]]:
+    if not _has_xyz(point):
+        return None
+    return {
+        "x": float(point["x"]),
+        "y": float(point["y"]),
+        "z": float(point["z"]),
+    }
+
+
+def _normalize_spawn(spawn: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(spawn, dict) or not _has_xyz(spawn):
+        return None
+    out: Dict[str, Any] = {
+        "x": float(spawn["x"]),
+        "y": float(spawn["y"]),
+        "z": float(spawn["z"]),
+        "radius": float(spawn.get("radius") or 0),
+    }
+    if spawn.get("yaw") is not None:
+        out["yaw"] = float(spawn["yaw"])
+    if spawn.get("pitch") is not None:
+        out["pitch"] = float(spawn["pitch"])
+    return out
+
+
+def _normalize_teams(raw_teams: Any) -> Dict[str, Any]:
+    teams_out: Dict[str, Any] = {}
+    teams = raw_teams if isinstance(raw_teams, dict) else {}
+    for team_id in ("a", "b"):
+        team = teams.get(team_id) or {}
+        spawns = []
+        for spawn in team.get("spawns") or []:
+            norm = _normalize_spawn(spawn)
+            if norm is not None:
+                spawns.append(norm)
+        teams_out[team_id] = {
+            "name": str(team.get("name") or ("红队" if team_id == "a" else "蓝队")),
+            "spawns": spawns,
+        }
+    return teams_out
+
+
+def _normalize_mode(raw: Dict[str, Any]) -> Dict[str, Any]:
+    mode = str(raw.get("mode") or "tdm").strip().lower()
+    return {
+        "mode": mode,
+        "max_players_per_team": max(1, int(raw.get("max_players_per_team") or 8)),
+        "target_score": max(1, int(raw.get("target_score") or 50)),
+        "teams": _normalize_teams(raw.get("teams")),
+    }
+
+
+def migrate_legacy_map(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """旧格式（单 mode + teams）迁移到新格式（region + modes[]）。"""
+    if isinstance(raw.get("modes"), list):
+        return raw
+    mode_cfg = {
+        "mode": str(raw.get("mode") or "tdm").strip().lower(),
+        "max_players_per_team": raw.get("max_players_per_team", 8),
+        "target_score": raw.get("target_score", 50),
+        "teams": raw.get("teams") or {},
+    }
+    return {
+        "id": raw.get("id"),
+        "display_name": raw.get("display_name") or raw.get("id"),
+        "dimension": raw.get("dimension") or "overworld",
+        "region": raw.get("region") or {},
+        "modes": [mode_cfg],
+    }
+
+
+def normalize_map(raw: Dict[str, Any]) -> Dict[str, Any]:
+    migrated = migrate_legacy_map(raw)
+    region_in = migrated.get("region") if isinstance(migrated.get("region"), dict) else {}
+    pos1 = _normalize_point(region_in.get("pos1"))
+    pos2 = _normalize_point(region_in.get("pos2"))
+    modes_out: List[Dict[str, Any]] = []
+    for mode_raw in migrated.get("modes") or []:
+        if not isinstance(mode_raw, dict):
+            continue
+        modes_out.append(_normalize_mode(mode_raw))
+    return {
+        "id": str(migrated.get("id") or "").strip(),
+        "display_name": str(migrated.get("display_name") or migrated.get("id") or "").strip(),
+        "dimension": str(migrated.get("dimension") or "overworld").strip(),
+        "region": {"pos1": pos1, "pos2": pos2},
+        "modes": modes_out,
+    }
+
+
 def validate_map(raw: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     if not isinstance(raw, dict):
         return ["map is not an object"]
     if not str(raw.get("id") or "").strip():
         errors.append("missing id")
-    mode = str(raw.get("mode") or "").strip().lower()
-    if not mode:
-        errors.append("missing mode")
-    teams = raw.get("teams")
-    if not isinstance(teams, dict):
-        errors.append("missing teams")
-        return errors
-    for team_id in ("a", "b"):
-        team = teams.get(team_id)
-        if not isinstance(team, dict):
-            errors.append(f"missing teams.{team_id}")
-            continue
-        spawns = team.get("spawns")
-        if not isinstance(spawns, list) or not spawns:
-            errors.append(f"teams.{team_id} needs at least one spawn")
-            continue
-        for i, spawn in enumerate(spawns):
-            if not isinstance(spawn, dict) or not _has_xyz(spawn):
-                errors.append(f"teams.{team_id}.spawns[{i}] needs x/y/z")
+    if not str(raw.get("display_name") or raw.get("id") or "").strip():
+        errors.append("missing display_name")
+    modes = raw.get("modes")
+    if not isinstance(modes, list):
+        errors.append("missing modes array")
     return errors
+
+
+def has_region(map_cfg: Dict[str, Any]) -> bool:
+    region = map_cfg.get("region") or {}
+    return _normalize_point(region.get("pos1")) is not None and _normalize_point(region.get("pos2")) is not None
+
+
+def region_bounds(map_cfg: Dict[str, Any]) -> Optional[Tuple[float, float, float, float, float, float]]:
+    region = map_cfg.get("region") or {}
+    pos1 = _normalize_point(region.get("pos1"))
+    pos2 = _normalize_point(region.get("pos2"))
+    if pos1 is None or pos2 is None:
+        return None
+    return (
+        min(pos1["x"], pos2["x"]),
+        max(pos1["x"], pos2["x"]),
+        min(pos1["y"], pos2["y"]),
+        max(pos1["y"], pos2["y"]),
+        min(pos1["z"], pos2["z"]),
+        max(pos1["z"], pos2["z"]),
+    )
+
+
+def point_in_region(map_cfg: Dict[str, Any], x: float, y: float, z: float) -> bool:
+    bounds = region_bounds(map_cfg)
+    if bounds is None:
+        return True
+    x1, x2, y1, y2, z1, z2 = bounds
+    return x1 <= x <= x2 and y1 <= y <= y2 and z1 <= z <= z2
+
+
+def get_mode_config(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
+    target = str(mode or "").strip().lower()
+    for mode_cfg in map_cfg.get("modes") or []:
+        if str(mode_cfg.get("mode") or "").lower() == target:
+            return mode_cfg
+    return None
+
+
+def mode_has_spawns(mode_cfg: Dict[str, Any]) -> bool:
+    teams = mode_cfg.get("teams") or {}
+    for team_id in ("a", "b"):
+        team = teams.get(team_id) or {}
+        spawns = team.get("spawns") or []
+        if not spawns:
+            return False
+    return True
+
+
+def mode_playable(map_cfg: Dict[str, Any], mode: str) -> bool:
+    mode_key = str(mode or "").strip().lower()
+    if mode_key not in IMPLEMENTED_MODES:
+        return False
+    if not has_region(map_cfg):
+        return False
+    mode_cfg = get_mode_config(map_cfg, mode_key)
+    if mode_cfg is None:
+        return False
+    return mode_has_spawns(mode_cfg)
+
+
+def playable_modes(map_cfg: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for mode_cfg in map_cfg.get("modes") or []:
+        mode = str(mode_cfg.get("mode") or "").lower()
+        if mode_playable(map_cfg, mode):
+            out.append(mode)
+    return out
+
+
+def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
+    mode_key = str(mode or "").strip().lower()
+    mode_cfg = get_mode_config(map_cfg, mode_key)
+    if mode_cfg is None:
+        return None
+    return {
+        "id": map_cfg["id"],
+        "display_name": map_cfg.get("display_name") or map_cfg["id"],
+        "dimension": map_cfg.get("dimension") or "overworld",
+        "region": map_cfg.get("region") or {},
+        "mode": mode_key,
+        "max_players_per_team": int(mode_cfg.get("max_players_per_team") or 8),
+        "target_score": int(mode_cfg.get("target_score") or 50),
+        "teams": mode_cfg.get("teams") or {},
+    }
 
 
 def validate_weapon(raw: Dict[str, Any]) -> List[str]:
@@ -176,49 +303,6 @@ def validate_weapon(raw: Dict[str, Any]) -> List[str]:
     if not isinstance(extras, dict):
         errors.append("extras must be an object of item_id -> count")
     return errors
-
-
-def _has_xyz(spawn: Dict[str, Any]) -> bool:
-    try:
-        float(spawn["x"])
-        float(spawn["y"])
-        float(spawn["z"])
-        return True
-    except (KeyError, TypeError, ValueError):
-        return False
-
-
-def normalize_map(raw: Dict[str, Any]) -> Dict[str, Any]:
-    teams_out: Dict[str, Any] = {}
-    for team_id in ("a", "b"):
-        team = raw.get("teams", {}).get(team_id) or {}
-        spawns = []
-        for spawn in team.get("spawns") or []:
-            if not isinstance(spawn, dict) or not _has_xyz(spawn):
-                continue
-            spawns.append(
-                {
-                    "x": float(spawn["x"]),
-                    "y": float(spawn["y"]),
-                    "z": float(spawn["z"]),
-                    "radius": float(spawn.get("radius") or 0),
-                    "yaw": float(spawn["yaw"]) if spawn.get("yaw") is not None else None,
-                    "pitch": float(spawn["pitch"]) if spawn.get("pitch") is not None else None,
-                }
-            )
-        teams_out[team_id] = {
-            "name": str(team.get("name") or ("红队" if team_id == "a" else "蓝队")),
-            "spawns": spawns,
-        }
-    return {
-        "id": str(raw.get("id")).strip(),
-        "display_name": str(raw.get("display_name") or raw.get("id")),
-        "mode": str(raw.get("mode") or "tdm").strip().lower(),
-        "max_players_per_team": max(1, int(raw.get("max_players_per_team") or 8)),
-        "target_score": max(1, int(raw.get("target_score") or 50)),
-        "dimension": str(raw.get("dimension") or "overworld").strip(),
-        "teams": teams_out,
-    }
 
 
 def normalize_weapon(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -300,11 +384,13 @@ class SettingManager:
 
 class ConfigStore:
     def __init__(self, logger=None):
+        from endstone_arc_shooter_game.map_db import MapDatabase
+
         self.logger = logger
         self.settings = SettingManager()
         self.maps: Dict[str, Dict[str, Any]] = {}
         self.weapons: Dict[str, Dict[str, Any]] = {}
-        self.maps_path = PLUGIN_DATA_DIR / "maps.json"
+        self.map_db = MapDatabase(logger=logger)
         self.weapons_path = PLUGIN_DATA_DIR / "weapons.json"
         self.reload()
 
@@ -317,13 +403,54 @@ class ConfigStore:
         print(f"[{level.upper()}] {message}")
 
     def reload(self) -> None:
+        from endstone_arc_shooter_game.map_db import MapDatabase
+
         self.settings = SettingManager()
-        self.maps = self._load_json_list(
-            self.maps_path, DEFAULT_MAPS, "maps", validate_map, normalize_map
-        )
+        self.map_db = MapDatabase(logger=self.logger)
+        self.maps = self.map_db.load_all()
         self.weapons = self._load_json_list(
             self.weapons_path, DEFAULT_WEAPONS, "weapons", validate_weapon, normalize_weapon
         )
+
+    def save_maps(self) -> None:
+        for entry in self.maps.values():
+            self.map_db.save_map(entry)
+
+    def create_map(self, display_name: str, dimension: str = "overworld") -> Dict[str, Any]:
+        base_id = slugify_map_id(display_name)
+        map_id = base_id
+        suffix = 1
+        while map_id in self.maps:
+            suffix += 1
+            map_id = f"{base_id}_{suffix}"
+        entry = normalize_map(
+            {
+                "id": map_id,
+                "display_name": display_name.strip(),
+                "dimension": dimension,
+                "region": {},
+                "modes": [],
+            }
+        )
+        self.maps[map_id] = entry
+        self.map_db.save_map(entry)
+        return entry
+
+    def update_map(self, map_id: str, updater) -> Optional[Dict[str, Any]]:
+        entry = self.maps.get(map_id)
+        if entry is None:
+            return None
+        updater(entry)
+        entry = normalize_map(entry)
+        self.maps[map_id] = entry
+        self.map_db.save_map(entry)
+        return entry
+
+    def delete_map(self, map_id: str) -> bool:
+        if map_id not in self.maps:
+            return False
+        del self.maps[map_id]
+        return self.map_db.delete_map(map_id)
 
     def _load_json_list(
         self,
@@ -369,10 +496,10 @@ class ConfigStore:
         )
 
     def starting_points(self) -> int:
-        return max(0, self.settings.GetSettingInt("STARTING_POINTS", 800))
+        return max(0, self.settings.GetSettingInt("STARTING_POINTS", 1000))
 
     def kill_reward(self) -> int:
-        return max(0, self.settings.GetSettingInt("KILL_REWARD_POINTS", 100))
+        return max(0, self.settings.GetSettingInt("KILL_REWARD_POINTS", 50))
 
     def lobby_timeout(self) -> int:
         return max(30, self.settings.GetSettingInt("LOBBY_TIMEOUT_SECONDS", 900))

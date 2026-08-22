@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-STATE_IDLE = "idle"
+from endstone_arc_shooter_game.config import IMPLEMENTED_MODES, build_runtime_map_cfg, mode_playable
+
 STATE_LOBBY = "lobby"
 STATE_BUYING = "buying"
 STATE_PLAYING = "playing"
@@ -46,7 +48,6 @@ def apply_kill(
     kill_reward: int,
     killer_points: int,
 ) -> Dict[str, Any]:
-    """敌方击杀：队分 +1 并发点数。友伤：队分 -1（不低于 0），不发点数。"""
     friendly = killer_team == victim_team
     if friendly:
         if killer_team == TEAM_A:
@@ -78,7 +79,6 @@ def apply_kill(
 
 
 def first_empty_or_first(occupied: List[Optional[str]], capacity: int) -> int:
-    """道具等可持有多件时：先填空位，满了则替换第 0 格。"""
     if capacity <= 0:
         return 0
     for i in range(capacity):
@@ -101,10 +101,13 @@ class PlayerState:
 
 
 @dataclass
-class MapInstance:
-    map_cfg: Dict[str, Any]
-    state: str = STATE_IDLE
-    admin: Optional[str] = None
+class Lobby:
+    admin: str
+    lobby_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    map_id: Optional[str] = None
+    mode: Optional[str] = None
+    map_cfg: Optional[Dict[str, Any]] = None
+    state: str = STATE_LOBBY
     lobby_started_at: float = 0.0
     buy_ends_at: float = 0.0
     players: Dict[str, PlayerState] = field(default_factory=dict)
@@ -113,30 +116,37 @@ class MapInstance:
     history: List[PlayerState] = field(default_factory=list)
 
     @property
-    def map_id(self) -> str:
-        return self.map_cfg["id"]
-
-    @property
     def display_name(self) -> str:
-        return self.map_cfg.get("display_name") or self.map_id
+        if self.map_cfg:
+            return str(self.map_cfg.get("display_name") or self.map_cfg.get("id") or self.lobby_id)
+        return self.lobby_id
 
     @property
-    def mode(self) -> str:
-        return str(self.map_cfg.get("mode") or "tdm").lower()
+    def active_mode(self) -> str:
+        if self.map_cfg:
+            return str(self.map_cfg.get("mode") or self.mode or "tdm").lower()
+        return str(self.mode or "").lower()
 
     @property
     def max_per_team(self) -> int:
-        return int(self.map_cfg.get("max_players_per_team") or 8)
+        if self.map_cfg:
+            return int(self.map_cfg.get("max_players_per_team") or 8)
+        return 8
 
     @property
     def target_score(self) -> int:
-        return int(self.map_cfg.get("target_score") or 50)
+        if self.map_cfg:
+            return int(self.map_cfg.get("target_score") or 50)
+        return 50
 
     def team_name(self, team_id: str) -> str:
-        team = (self.map_cfg.get("teams") or {}).get(team_id) or {}
+        team = (self.map_cfg.get("teams") or {}).get(team_id) if self.map_cfg else {}
+        team = team or {}
         return str(team.get("name") or ("红队" if team_id == TEAM_A else "蓝队"))
 
     def team_spawns(self, team_id: str) -> List[Dict[str, Any]]:
+        if not self.map_cfg:
+            return []
         team = (self.map_cfg.get("teams") or {}).get(team_id) or {}
         return list(team.get("spawns") or [])
 
@@ -162,8 +172,6 @@ class MapInstance:
         return None
 
     def can_join(self) -> Tuple[bool, str]:
-        if self.state in (STATE_BUYING, STATE_PLAYING):
-            return False, "playing"
         if self.pick_join_team() is None:
             return False, "full"
         return True, "ok"
@@ -176,27 +184,20 @@ class MapInstance:
         team = self.pick_join_team()
         if team is None:
             return False, "full"
-        became_admin = False
-        if self.state == STATE_IDLE:
-            self.state = STATE_LOBBY
-            self.admin = player_name
+        became_admin = self.player_count() == 0
+        if self.lobby_started_at <= 0:
             self.lobby_started_at = now
-            self.score_a = 0
-            self.score_b = 0
-            self.history = []
+        if not self.admin:
+            self.admin = player_name
             became_admin = True
         self.players[player_name] = PlayerState(
             name=player_name,
             team=team,
             points=int(starting_points),
         )
-        if not self.admin:
-            self.admin = player_name
-            became_admin = True
         return True, "admin" if became_admin else "ok"
 
     def leave(self, player_name: str) -> Optional[str]:
-        """返回新管理员名（若发生移交），或 None。"""
         ps = self.players.pop(player_name, None)
         if ps is None:
             return None
@@ -208,8 +209,6 @@ class MapInstance:
             remaining = self.online_players()
             self.admin = remaining[0].name if remaining else None
             new_admin = self.admin
-        if self.state == STATE_LOBBY and self.player_count() == 0:
-            self.reset_idle()
         return new_admin
 
     def kick(self, target_name: str) -> bool:
@@ -233,9 +232,27 @@ class MapInstance:
         ps.team = team
         return True, "ok"
 
+    def set_map_and_mode(self, map_cfg: Dict[str, Any], mode: str) -> Tuple[bool, str]:
+        mode_key = str(mode or "").strip().lower()
+        if mode_key not in IMPLEMENTED_MODES:
+            return False, "unimplemented"
+        if not mode_playable(map_cfg, mode_key):
+            return False, "not_ready"
+        runtime = build_runtime_map_cfg(map_cfg, mode_key)
+        if runtime is None:
+            return False, "not_ready"
+        self.map_id = map_cfg["id"]
+        self.mode = mode_key
+        self.map_cfg = runtime
+        return True, "ok"
+
     def can_start(self) -> Tuple[bool, str]:
         if self.state != STATE_LOBBY:
             return False, "not_lobby"
+        if not self.map_id or not self.mode or self.map_cfg is None:
+            return False, "need_map"
+        if self.active_mode not in IMPLEMENTED_MODES:
+            return False, "unimplemented"
         if self.player_count() < 2:
             return False, "need_players"
         if self.team_count(TEAM_A) == 0 or self.team_count(TEAM_B) == 0:
@@ -293,7 +310,6 @@ class MapInstance:
         return result
 
     def remaining_winner(self) -> Optional[str]:
-        """一方无人时另一方获胜；双方都空则无胜者。"""
         a = self.team_count(TEAM_A)
         b = self.team_count(TEAM_B)
         if a == 0 and b == 0:
@@ -312,28 +328,7 @@ class MapInstance:
                 rows.append(ps)
         return rows
 
-    def reset_idle(self) -> None:
-        self.state = STATE_IDLE
-        self.admin = None
-        self.lobby_started_at = 0.0
-        self.buy_ends_at = 0.0
-        self.players = {}
-        self.score_a = 0
-        self.score_b = 0
-        self.history = []
-
-    def equipped_id(self, player_name: str, weapon_type: str) -> Optional[str]:
-        ps = self.players.get(player_name)
-        if ps is None:
-            return None
-        if weapon_type == "primary":
-            return ps.primary_id
-        if weapon_type == "secondary":
-            return ps.secondary_id
-        return None
-
     def record_purchase(self, player_name: str, weapon: Dict[str, Any], gadget_capacity: int) -> Tuple[int, Optional[str]]:
-        """记录购买并返回 (替换的格子偏移, 被替换的旧武器 id)。格子偏移相对于该类型起始槽。"""
         ps = self.players.get(player_name)
         if ps is None:
             return 0, None
@@ -356,3 +351,7 @@ class MapInstance:
         else:
             ps.gadgets[idx] = wid
         return idx, old
+
+
+# 兼容旧测试/引用
+MapInstance = Lobby
