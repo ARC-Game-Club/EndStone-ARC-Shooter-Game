@@ -11,6 +11,36 @@ from typing import Any, Dict, List, Optional
 from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 ARMOR_ATTRS = ("helmet", "chestplate", "leggings", "boots", "item_in_off_hand")
+ARMOR_ITEM_SLOTS = {
+    "minecraft:leather_helmet": "helmet",
+    "minecraft:chainmail_helmet": "helmet",
+    "minecraft:iron_helmet": "helmet",
+    "minecraft:golden_helmet": "helmet",
+    "minecraft:diamond_helmet": "helmet",
+    "minecraft:netherite_helmet": "helmet",
+    "minecraft:copper_helmet": "helmet",
+    "minecraft:leather_chestplate": "chestplate",
+    "minecraft:chainmail_chestplate": "chestplate",
+    "minecraft:iron_chestplate": "chestplate",
+    "minecraft:golden_chestplate": "chestplate",
+    "minecraft:diamond_chestplate": "chestplate",
+    "minecraft:netherite_chestplate": "chestplate",
+    "minecraft:copper_chestplate": "chestplate",
+    "minecraft:leather_leggings": "leggings",
+    "minecraft:chainmail_leggings": "leggings",
+    "minecraft:iron_leggings": "leggings",
+    "minecraft:golden_leggings": "leggings",
+    "minecraft:diamond_leggings": "leggings",
+    "minecraft:netherite_leggings": "leggings",
+    "minecraft:copper_leggings": "leggings",
+    "minecraft:leather_boots": "boots",
+    "minecraft:chainmail_boots": "boots",
+    "minecraft:iron_boots": "boots",
+    "minecraft:golden_boots": "boots",
+    "minecraft:diamond_boots": "boots",
+    "minecraft:netherite_boots": "boots",
+    "minecraft:copper_boots": "boots",
+}
 _UNSAFE_FILE_CHARS = re.compile(r'[<>:"/\\\\|?*]')
 
 
@@ -199,6 +229,50 @@ def delete_snapshot_disk(player_name: str) -> None:
             path.unlink()
     except OSError:
         pass
+
+
+def clear_armor(player: Any) -> None:
+    inv = getattr(player, "inventory", None)
+    if inv is None:
+        return
+    for attr in ARMOR_ATTRS:
+        if hasattr(inv, attr):
+            try:
+                setattr(inv, attr, None)
+            except Exception:
+                pass
+
+
+def apply_armor_extras(player: Any, extras: Dict[str, int], data: int = 0) -> None:
+    inv = getattr(player, "inventory", None)
+    if inv is None:
+        return
+    for item_id, count in (extras or {}).items():
+        if int(count or 0) <= 0:
+            continue
+        slot = ARMOR_ITEM_SLOTS.get(str(item_id))
+        if slot is None or not hasattr(inv, slot):
+            continue
+        try:
+            setattr(inv, slot, make_item_stack(str(item_id), 1, data))
+        except Exception:
+            continue
+
+
+def remove_armor_extras(player: Any, extras: Dict[str, int]) -> None:
+    inv = getattr(player, "inventory", None)
+    if inv is None:
+        return
+    for item_id in (extras or {}).keys():
+        slot = ARMOR_ITEM_SLOTS.get(str(item_id))
+        if slot is None or not hasattr(inv, slot):
+            continue
+        try:
+            existing = getattr(inv, slot, None)
+            if existing is not None and _item_type_id(existing) == str(item_id):
+                setattr(inv, slot, None)
+        except Exception:
+            continue
 
 
 def make_item_stack(item_id: str, amount: int, data: int = 0) -> Any:

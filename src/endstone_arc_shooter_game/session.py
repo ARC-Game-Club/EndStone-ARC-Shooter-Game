@@ -96,6 +96,7 @@ class PlayerState:
     deaths: int = 0
     primary_id: Optional[str] = None
     secondary_id: Optional[str] = None
+    armor_id: Optional[str] = None
     gadgets: List[Optional[str]] = field(default_factory=list)
     still_in: bool = True
 
@@ -110,6 +111,7 @@ class Lobby:
     state: str = STATE_LOBBY
     lobby_started_at: float = 0.0
     buy_ends_at: float = 0.0
+    match_ends_at: float = 0.0
     players: Dict[str, PlayerState] = field(default_factory=dict)
     score_a: int = 0
     score_b: int = 0
@@ -138,6 +140,19 @@ class Lobby:
         if self.map_cfg:
             return int(self.map_cfg.get("target_score") or 50)
         return 50
+
+    @property
+    def match_time_minutes(self) -> int:
+        if self.map_cfg:
+            try:
+                return max(1, int(self.map_cfg.get("match_time_minutes") or 5))
+            except (TypeError, ValueError):
+                return 5
+        return 5
+
+    @property
+    def match_time_seconds(self) -> int:
+        return self.match_time_minutes * 60
 
     def team_name(self, team_id: str) -> str:
         team = (self.map_cfg.get("teams") or {}).get(team_id) if self.map_cfg else {}
@@ -268,8 +283,10 @@ class Lobby:
         self.score_a = 0
         self.score_b = 0
 
-    def begin_playing(self) -> None:
+    def begin_playing(self, match_seconds: int = 300, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
         self.state = STATE_PLAYING
+        self.match_ends_at = now + max(1, int(match_seconds))
 
     def lobby_timed_out(self, timeout_seconds: int, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
@@ -280,6 +297,23 @@ class Lobby:
     def buy_remaining(self, now: Optional[float] = None) -> float:
         now = time.time() if now is None else now
         return max(0.0, self.buy_ends_at - now)
+
+    def match_remaining(self, now: Optional[float] = None) -> float:
+        now = time.time() if now is None else now
+        return max(0.0, self.match_ends_at - now)
+
+    def match_timed_out(self, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else now
+        if self.state != STATE_PLAYING:
+            return False
+        return self.match_ends_at > 0 and now >= self.match_ends_at
+
+    def winner_by_score(self) -> Optional[str]:
+        if self.score_a > self.score_b:
+            return TEAM_A
+        if self.score_b > self.score_a:
+            return TEAM_B
+        return None
 
     def apply_player_kill(self, killer_name: str, victim_name: str, kill_reward: int) -> Optional[Dict[str, Any]]:
         killer = self.players.get(killer_name)
@@ -341,6 +375,10 @@ class Lobby:
         if wtype == "secondary":
             old = ps.secondary_id
             ps.secondary_id = wid
+            return 0, old
+        if wtype == "armor":
+            old = ps.armor_id
+            ps.armor_id = wid
             return 0, old
         if len(ps.gadgets) < gadget_capacity:
             ps.gadgets.extend([None] * (gadget_capacity - len(ps.gadgets)))

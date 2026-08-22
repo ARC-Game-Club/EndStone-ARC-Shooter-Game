@@ -12,6 +12,8 @@ from endstone.event import (
     event_handler,
     PlayerDeathEvent,
     PlayerDropItemEvent,
+    PlayerInteractEvent,
+    PlayerItemConsumeEvent,
     PlayerJoinEvent,
     PlayerQuitEvent,
     PlayerRespawnEvent,
@@ -26,15 +28,21 @@ from endstone_arc_shooter_game.config import (
     build_runtime_map_cfg,
     get_mode_config,
     has_region,
+    map_incomplete_reasons,
+    mode_incomplete_reasons,
     mode_playable,
     playable_modes,
     point_in_region,
+    match_kd_score,
     slot_range,
 )
 from endstone_arc_shooter_game.inventory import (
+    apply_armor_extras,
+    clear_armor,
     delete_snapshot_disk,
     give_to_end_slots,
     load_snapshot_disk,
+    remove_armor_extras,
     remove_item_count,
     restore_inventory,
     save_snapshot_disk,
@@ -79,6 +87,14 @@ _VANILLA_CMD_DIM = {
     "the_nether": "nether",
     "minecraft:the_end": "the_end",
     "the_end": "the_end",
+}
+
+ARC_COIN_ITEM = "arc:arc_coin"
+ARC_COIN_HOTBAR_SLOT = 8
+SHOP_DEBOUNCE_SECONDS = 0.2
+TEAM_NAME_COLOR = {
+    TEAM_A: "§c",
+    TEAM_B: "§9",
 }
 
 
@@ -148,8 +164,8 @@ class ARCShooterGamePlugin(Plugin):
 
     commands = {
         "gs": {
-            "description": "射击游戏菜单、商店与离开",
-            "usages": ["/gs", "/gs buy", "/gs leave", "/gs reload"],
+            "description": "射击游戏菜单与离开",
+            "usages": ["/gs", "/gs leave", "/gs reload"],
             "permissions": ["arc_shooter_game.command.gs"],
         }
     }
@@ -169,6 +185,8 @@ class ARCShooterGamePlugin(Plugin):
         self.player_to_lobby: Dict[str, str] = {}
         self.backups: Dict[str, Dict[str, Any]] = {}
         self._last_attacker: Dict[str, Tuple[str, float]] = {}
+        self._shop_open_at: Dict[str, float] = {}
+        self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
         self._tick_task = None
 
@@ -270,11 +288,11 @@ class ARCShooterGamePlugin(Plugin):
         if not isinstance(sender, Player):
             sender.send_message(self._t("CMD_PLAYER_ONLY"))
             return True
-        if sub == "buy":
-            self._show_shop(sender)
-            return True
         if sub == "leave":
             self._handle_leave(sender, confirm_match=True)
+            return True
+        if sub and sub not in ("leave",):
+            sender.send_message(self._t("CMD_UNKNOWN_SUB").format(sub))
             return True
         self._show_root_menu(sender)
         return True
@@ -360,7 +378,7 @@ class ARCShooterGamePlugin(Plugin):
                         )
                 victim_player = self._get_player(victim_name)
                 if victim_player:
-                    victim_player.send_message(self._t("PLAYER_KILLED").format(killer_name))
+                    victim_player.send_message(self._t("PLAYER_KILLED").format(killer_name or "未知"))
                 self._broadcast(
                     lobby,
                     self._t("SCORE_UPDATE").format(
@@ -388,9 +406,41 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             return
         try:
-            self.server.scheduler.run_task(self, lambda p=player, lb=lobby: self._tp_to_team_spawn(p, lb), delay=1)
+            self.server.scheduler.run_task(
+                self,
+                lambda p=player, lb=lobby: (
+                    self._respawn_in_match(p, lb),
+                    self._apply_team_name_tag(p, lb),
+                ),
+                delay=1,
+            )
         except Exception:
-            self._tp_to_team_spawn(player, lobby)
+            self._respawn_in_match(player, lobby)
+            self._apply_team_name_tag(player, lobby)
+
+    @event_handler
+    def on_player_interact(self, event: PlayerInteractEvent):
+        player = getattr(event, "player", None)
+        if player is None:
+            return
+        if self._hand_item_id(player) != ARC_COIN_ITEM:
+            return
+        if hasattr(event, "is_cancelled"):
+            event.is_cancelled = True
+        self._try_open_shop(player)
+
+    @event_handler
+    def on_player_item_consume(self, event: PlayerItemConsumeEvent):
+        player = getattr(event, "player", None)
+        if player is None:
+            return
+        item = getattr(event, "item", None)
+        item_type = getattr(getattr(item, "type", None), "id", None) or str(getattr(item, "type", "") or "")
+        if str(item_type) != ARC_COIN_ITEM:
+            return
+        if hasattr(event, "is_cancelled"):
+            event.is_cancelled = True
+        self._try_open_shop(player)
 
     @event_handler
     def on_player_drop_item(self, event: PlayerDropItemEvent):
@@ -412,8 +462,16 @@ class ARCShooterGamePlugin(Plugin):
                     self._dissolve_lobby(lobby, timeout=True)
                     continue
                 if lobby.state == STATE_BUYING and lobby.buy_remaining(now) <= 0:
-                    lobby.begin_playing()
-                    self._broadcast(lobby, self._t("GAME_STARTED").format(lobby.target_score))
+                    match_seconds = lobby.match_time_seconds
+                    lobby.begin_playing(match_seconds, now)
+                    match_min = lobby.match_time_minutes
+                    self._broadcast(
+                        lobby,
+                        self._t("GAME_STARTED").format(match_min, lobby.target_score),
+                    )
+                if lobby.state == STATE_PLAYING and lobby.match_timed_out(now):
+                    self._end_match(lobby, lobby.winner_by_score(), timed_out=True)
+                    continue
                 if lobby.state in (STATE_BUYING, STATE_PLAYING):
                     self._send_score_tips(lobby, now)
                     self._enforce_region(lobby)
@@ -448,7 +506,10 @@ class ARCShooterGamePlugin(Plugin):
             if lobby.state == STATE_BUYING:
                 msg = self._t("BUY_TIME_TIP").format(remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points)
             else:
-                msg = self._t("PLAYING_TIP").format(a_name, lobby.score_a, lobby.score_b, b_name, ps.points)
+                match_remain = int(math.ceil(lobby.match_remaining(now)))
+                msg = self._t("PLAYING_TIP").format(
+                    match_remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points
+                )
             if hasattr(player, "send_tip"):
                 try:
                     player.send_tip(msg)
@@ -475,8 +536,16 @@ class ARCShooterGamePlugin(Plugin):
             player.send_message(self._t("JOIN_FAIL_FULL"))
             return
         self.player_to_lobby[player.name] = lobby.lobby_id
-        player.send_message(self._t("JOIN_OK_ADMIN"))
-        self._show_lobby_menu(player, lobby)
+        self._notify(player, self._t("JOIN_OK_ADMIN"))
+        self._apply_team_name_tag(player, lobby)
+        self._broadcast_server(
+            self._t("LOBBY_CREATED_BROADCAST").format(
+                player.name,
+                self._lobby_map_label(lobby),
+                self._lobby_mode_label(lobby),
+            )
+        )
+        self._refresh_lobby_menus(lobby)
 
     def _join_lobby(self, player: Player, lobby_id: str) -> None:
         if self._lobby_of(player.name) is not None:
@@ -492,17 +561,25 @@ class ARCShooterGamePlugin(Plugin):
             return
         self.player_to_lobby[player.name] = lobby.lobby_id
         if lobby.state in (STATE_BUYING, STATE_PLAYING):
-            player.send_message(self._t("JOIN_OK_MATCH"))
+            self._notify(player, self._t("JOIN_OK_MATCH"))
             self._prepare_fighter(player, lobby)
+            self._apply_team_name_tag(player, lobby)
             self._show_match_menu(player, lobby)
             return
-        player.send_message(self._t("JOIN_OK").format(lobby.admin or "-"))
-        self._show_lobby_menu(player, lobby)
+        count = lobby.player_count()
+        max_players = lobby.max_per_team * 2
+        self._notify(player, self._t("JOIN_OK").format(lobby.admin or "-"))
+        self._notify_lobby_members_joined(lobby, player.name, count, max_players)
+        self._apply_team_name_tag(player, lobby)
+        self._refresh_lobby_menus(lobby)
 
     def _leave_lobby(self, player: Player, lobby: Lobby) -> None:
-        new_admin = lobby.leave(player.name)
-        self.player_to_lobby.pop(player.name, None)
+        leaver_name = player.name
+        new_admin = lobby.leave(leaver_name)
+        self.player_to_lobby.pop(leaver_name, None)
+        self._restore_name_tag(player)
         player.send_message(self._t("LEAVE_OK"))
+        self._schedule_root_menu(player)
         if lobby.player_count() == 0:
             self.lobbies.pop(lobby.lobby_id, None)
             return
@@ -510,6 +587,7 @@ class ARCShooterGamePlugin(Plugin):
             admin_player = self._get_player(new_admin)
             if admin_player:
                 admin_player.send_message(self._t("ADMIN_TRANSFERRED"))
+        self._notify_lobby_members_left(lobby, leaver_name)
 
     def _handle_leave(self, player: Player, confirm_match: bool) -> None:
         lobby = self._lobby_of(player.name)
@@ -529,6 +607,7 @@ class ARCShooterGamePlugin(Plugin):
         lobby.leave(player.name)
         self.player_to_lobby.pop(player.name, None)
         self._restore_player(player, after_match=True)
+        self._restore_name_tag(player)
         player.send_message(self._t("LEAVE_OK"))
         if lobby.state not in (STATE_BUYING, STATE_PLAYING):
             return
@@ -547,6 +626,7 @@ class ARCShooterGamePlugin(Plugin):
             self.player_to_lobby.pop(name, None)
             player = self._get_player(name)
             if player:
+                self._restore_name_tag(player)
                 player.send_message(msg)
         self.lobbies.pop(lobby.lobby_id, None)
 
@@ -564,6 +644,7 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(self._t("START_NEED_PLAYERS"))
             return
         buy_seconds = self.config_store.buy_time() if self.config_store else 10
+        match_seconds = lobby.match_time_seconds
         starting = self.config_store.starting_points() if self.config_store else 1000
         for ps in lobby.online_players():
             ps.points = starting
@@ -571,18 +652,21 @@ class ARCShooterGamePlugin(Plugin):
             ps.deaths = 0
             ps.primary_id = None
             ps.secondary_id = None
+            ps.armor_id = None
             ps.gadgets = []
         lobby.begin_buy(buy_seconds)
         if buy_seconds <= 0:
-            lobby.begin_playing()
+            lobby.begin_playing(match_seconds)
         self._broadcast(lobby, self._t("START_BROADCAST").format(buy_seconds))
         for ps in lobby.online_players():
             member = self._get_player(ps.name)
             if member is None:
                 continue
             self._prepare_fighter(member, lobby)
+        self._apply_lobby_name_tags(lobby)
         if lobby.state == STATE_PLAYING:
-            self._broadcast(lobby, self._t("GAME_STARTED").format(lobby.target_score))
+            match_min = lobby.match_time_minutes
+            self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
 
     def _prepare_fighter(self, player: Player, lobby: Lobby) -> None:
         snap = snapshot_player(player, dimension_id_of(player.location))
@@ -599,6 +683,152 @@ class ARCShooterGamePlugin(Plugin):
         except Exception:
             pass
         self._tp_to_team_spawn(player, lobby)
+        self._give_arc_coin(player)
+
+    def _respawn_in_match(self, player: Player, lobby: Lobby) -> None:
+        self._tp_to_team_spawn(player, lobby)
+        self._clear_player(player.name)
+        clear_armor(player)
+        self._restore_player_loadout(player, lobby, gadgets=False)
+        ps = lobby.players.get(player.name)
+        if ps is not None:
+            try:
+                self.server.scheduler.run_task(
+                    self,
+                    lambda p=player, s=ps: self._apply_owned_weapon_ammo(p, s),
+                    delay=3,
+                )
+            except Exception:
+                self._apply_owned_weapon_ammo(player, ps)
+        try:
+            if hasattr(player, "health"):
+                player.health = getattr(player, "max_health", 20) or 20
+        except Exception:
+            pass
+
+    def _give_arc_coin(self, player: Player) -> None:
+        remove_item_count(player, ARC_COIN_ITEM, 64)
+        set_slot_item(player, ARC_COIN_HOTBAR_SLOT, ARC_COIN_ITEM, 1, 0)
+
+    def _try_open_shop(self, player: Player) -> bool:
+        lobby = self._lobby_of(player.name)
+        if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
+            return False
+        now = time.time()
+        last = self._shop_open_at.get(player.name, 0.0)
+        if now - last < SHOP_DEBOUNCE_SECONDS:
+            return True
+        self._shop_open_at[player.name] = now
+        self._show_shop(player)
+        return True
+
+    def _schedule_lobby_menu(self, player: Player, lobby: Lobby, delay: int = 5) -> None:
+        try:
+            self.server.scheduler.run_task(
+                self,
+                lambda p=player, lb=lobby: self._show_lobby_menu(p, lb),
+                delay=delay,
+            )
+        except Exception:
+            self._show_lobby_menu(player, lobby)
+
+    def _schedule_root_menu(self, player: Player, delay: int = 5) -> None:
+        try:
+            self.server.scheduler.run_task(
+                self,
+                lambda p=player: self._show_root_menu(p),
+                delay=delay,
+            )
+        except Exception:
+            self._show_root_menu(player)
+
+    def _set_weapon_ammo(self, player_name: str, weapon: Dict[str, Any]) -> None:
+        objective = str(weapon.get("ammo_scoreboard") or "").strip()
+        if not objective:
+            return
+        try:
+            ammo = max(0, int(weapon.get("default_ammo") or 0))
+        except (TypeError, ValueError):
+            return
+        cmd = f"scoreboard players set {format_player_name(player_name)} {objective} {ammo}"
+        self.server.dispatch_command(self.server.command_sender, cmd)
+
+    def _apply_weapon_ammo(self, player: Player, weapon: Dict[str, Any]) -> None:
+        self._set_weapon_ammo(player.name, weapon)
+
+    def _apply_owned_weapon_ammo(self, player: Player, ps: Any) -> None:
+        if self.config_store is None:
+            return
+        weapons = self.config_store.weapons
+        for wid in (ps.primary_id, ps.secondary_id):
+            if not wid:
+                continue
+            weapon = weapons.get(wid)
+            if weapon:
+                self._apply_weapon_ammo(player, weapon)
+
+    def _restore_player_loadout(self, player: Player, lobby: Lobby, *, gadgets: bool = True) -> None:
+        if self.config_store is None:
+            return
+        ps = lobby.players.get(player.name)
+        if ps is None:
+            return
+        layout = self.config_store.layout()
+        reserved = int(layout.get("reserved", 0))
+        weapons = self.config_store.weapons
+
+        def give_owned(wid: Optional[str], wtype: str, slot_index: int = 0) -> None:
+            if not wid or wid not in weapons:
+                return
+            weapon = weapons[wid]
+            if wtype == "armor":
+                apply_armor_extras(player, weapon.get("extras") or {}, int(weapon.get("data") or 0))
+                return
+            start, end = slot_range(layout, wtype)
+            if end <= start:
+                return
+            slot = start + slot_index
+            if slot >= end:
+                return
+            set_slot_item(
+                player,
+                slot,
+                weapon["item"],
+                int(weapon.get("amount") or 1),
+                int(weapon.get("data") or 0),
+            )
+            for extra_id, extra_count in (weapon.get("extras") or {}).items():
+                give_to_end_slots(player, extra_id, extra_count, reserved, 0)
+
+        give_owned(ps.primary_id, "primary")
+        give_owned(ps.secondary_id, "secondary")
+        give_owned(ps.armor_id, "armor")
+        if gadgets:
+            for idx, gid in enumerate(ps.gadgets):
+                if gid:
+                    give_owned(gid, "gadget", idx)
+        self._give_arc_coin(player)
+
+    def _hand_item_id(self, player: Player) -> str:
+        inv = getattr(player, "inventory", None)
+        if inv is None:
+            return ""
+        hand = getattr(inv, "item_in_main_hand", None) or getattr(inv, "item_in_hand", None)
+        if hand is None:
+            return ""
+        item_type = getattr(hand, "type", None)
+        ident = getattr(item_type, "id", None)
+        if ident:
+            return str(ident)
+        return str(item_type or "")
+
+    def _notify(self, player: Player, message: str) -> None:
+        player.send_message(message)
+        if hasattr(player, "send_tip"):
+            try:
+                player.send_tip(message)
+            except Exception:
+                pass
 
     def _tp_to_team_spawn(self, player: Player, lobby: Lobby) -> None:
         ps = lobby.players.get(player.name)
@@ -618,39 +848,149 @@ class ARCShooterGamePlugin(Plugin):
             pos.get("pitch"),
         )
 
-    def _end_match(self, lobby: Lobby, winner: Optional[str]) -> None:
-        lines = self._result_lines(lobby, winner)
+    def _end_match(self, lobby: Lobby, winner: Optional[str], *, timed_out: bool = False) -> None:
+        rewards = self._distribute_match_rewards(lobby, winner)
+        result_content = self._match_result_content(lobby, winner, timed_out=timed_out, rewards=rewards)
         still = [ps.name for ps in lobby.online_players()]
         participants = {ps.name for ps in lobby.result_rows()}
+        target_names = set(still) | participants
         for name in still:
-            member = self._get_player(name)
             self.player_to_lobby.pop(name, None)
+            member = self._get_player(name)
             if member:
                 self._restore_player(member, after_match=True)
-        for name in participants:
+                self._restore_name_tag(member)
+        for name in target_names:
             member = self._get_player(name)
             if member is None:
                 continue
-            for line in lines:
-                member.send_message(line)
+            self._schedule_match_result_form(member, result_content)
         self.lobbies.pop(lobby.lobby_id, None)
 
-    def _result_lines(self, lobby: Lobby, winner: Optional[str]) -> list[str]:
-        lines = [self._t("MATCH_END_HEADER")]
+    def _get_arc_core(self):
+        try:
+            return self.server.plugin_manager.get_plugin("arc_core")
+        except Exception:
+            return None
+
+    def _distribute_match_rewards(
+        self, lobby: Lobby, winner: Optional[str]
+    ) -> Dict[str, Dict[str, int]]:
+        rewards: Dict[str, Dict[str, int]] = {}
+        if self.config_store is None:
+            return rewards
+        money_mult = self.config_store.match_money_per_kd()
+        contrib_mult = self.config_store.win_guild_contribution_per_kd()
+        if money_mult <= 0 and contrib_mult <= 0:
+            return rewards
+        core = self._get_arc_core()
+        if core is None:
+            self._safe_log("warning", "[ARCShooterGame] arc_core not loaded; skip match rewards")
+            return rewards
+        for ps in lobby.result_rows():
+            kd = match_kd_score(ps.kills, ps.deaths)
+            if kd <= 0:
+                continue
+            money = kd * money_mult if money_mult > 0 else 0
+            contribution = kd * contrib_mult if winner and ps.team == winner and contrib_mult > 0 else 0
+            entry = {"money": 0, "contribution": 0}
+            if money > 0:
+                try:
+                    if core.api_change_player_money(ps.name, float(money), notify=True):
+                        entry["money"] = money
+                except Exception as e:
+                    self._safe_log(
+                        "warning",
+                        f"[ARCShooterGame] match money reward for {ps.name}: {e}",
+                    )
+            if contribution > 0:
+                try:
+                    result = core.api_add_guild_contribution(ps.name, int(contribution))
+                    if result.get("ok"):
+                        entry["contribution"] = contribution
+                    elif result.get("error") != "GUILD_NOT_IN_GUILD":
+                        self._safe_log(
+                            "warning",
+                            f"[ARCShooterGame] guild contribution for {ps.name}: {result.get('error')}",
+                        )
+                except Exception as e:
+                    self._safe_log(
+                        "warning",
+                        f"[ARCShooterGame] match guild contribution for {ps.name}: {e}",
+                    )
+            if entry["money"] > 0 or entry["contribution"] > 0:
+                rewards[ps.name] = entry
+        return rewards
+
+    def _match_result_content(
+        self,
+        lobby: Lobby,
+        winner: Optional[str],
+        *,
+        timed_out: bool = False,
+        rewards: Optional[Dict[str, Dict[str, int]]] = None,
+    ) -> str:
+        a_name = lobby.team_name(TEAM_A)
+        b_name = lobby.team_name(TEAM_B)
+        parts: List[str] = []
+        if timed_out:
+            parts.append(self._t("MATCH_END_TIME_NOTE"))
+        parts.append(self._t("MATCH_END_SCORE").format(a_name, lobby.score_a, b_name, lobby.score_b))
         if winner:
-            lines.append(self._t("MATCH_END_WINNER").format(lobby.team_name(winner)))
+            parts.append(self._t("MATCH_END_WINNER").format(lobby.team_name(winner)))
         else:
-            lines.append(self._t("MATCH_END_DRAW"))
+            parts.append(self._t("MATCH_END_DRAW"))
+        parts.append("")
         rows = lobby.result_rows()
         for team_id in (TEAM_A, TEAM_B):
-            lines.append(self._t("MATCH_END_STATS_TEAM").format(lobby.team_name(team_id)))
+            parts.append(self._t("MATCH_END_STATS_TEAM").format(lobby.team_name(team_id)))
             members = [p for p in rows if p.team == team_id]
             if not members:
-                lines.append(self._t("NO_PLAYER"))
+                parts.append(self._t("NO_PLAYER"))
             for ps in members:
-                lines.append(self._t("MATCH_END_STATS_PLAYER").format(ps.name, ps.kills, ps.deaths))
-        lines.append(self._t("MATCH_END_FOOTER"))
-        return lines
+                parts.append(self._t("MATCH_END_STATS_PLAYER").format(ps.name, ps.kills, ps.deaths))
+        reward_map = rewards or {}
+        parts.append("")
+        parts.append(self._t("MATCH_END_REWARDS_HEADER"))
+        for ps in rows:
+            entry = reward_map.get(ps.name)
+            if entry:
+                money = int(entry.get("money", 0))
+                contribution = int(entry.get("contribution", 0))
+                if money > 0 and contribution > 0:
+                    parts.append(
+                        self._t("MATCH_END_REWARD_BOTH").format(ps.name, money, contribution)
+                    )
+                elif money > 0:
+                    parts.append(self._t("MATCH_END_REWARD_MONEY").format(ps.name, money))
+                elif contribution > 0:
+                    parts.append(self._t("MATCH_END_REWARD_CONTRIB").format(ps.name, contribution))
+                else:
+                    parts.append(self._t("MATCH_END_REWARD_NONE").format(ps.name))
+            else:
+                parts.append(self._t("MATCH_END_REWARD_NONE").format(ps.name))
+        return "\n".join(parts)
+
+    def _show_match_result_form(self, player: Player, content: str) -> None:
+        try:
+            form = ActionForm(title=self._t("MATCH_END_TITLE"), content=content)
+            form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
+            player.send_form(form)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] match result form: {e}\n{traceback.format_exc()}")
+            for line in content.splitlines():
+                if line.strip():
+                    player.send_message(line)
+
+    def _schedule_match_result_form(self, player: Player, content: str, delay: int = 5) -> None:
+        try:
+            self.server.scheduler.run_task(
+                self,
+                lambda p=player, c=content: self._show_match_result_form(p, c),
+                delay=delay,
+            )
+        except Exception:
+            self._show_match_result_form(player, content)
 
     def _is_probably_dead(self, player: Player) -> bool:
         if bool(getattr(player, "is_dead", False)):
@@ -734,6 +1074,49 @@ class ARCShooterGamePlugin(Plugin):
             if player:
                 player.send_message(message)
 
+    def _broadcast_server(self, message: str) -> None:
+        for player in self.server.online_players:
+            player.send_message(message)
+
+    def _notify_lobby_members_joined(
+        self, lobby: Lobby, joiner_name: str, count: int, max_players: int
+    ) -> None:
+        for ps in lobby.online_players():
+            if ps.name == joiner_name:
+                continue
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            if ps.name == lobby.admin:
+                self._notify(
+                    member,
+                    self._t("LOBBY_PLAYER_JOINED_ADMIN").format(joiner_name, count, max_players),
+                )
+            else:
+                self._notify(
+                    member,
+                    self._t("LOBBY_PLAYER_JOINED").format(joiner_name, count, max_players),
+                )
+
+    def _notify_lobby_members_left(self, lobby: Lobby, leaver_name: str) -> None:
+        count = lobby.player_count()
+        max_players = lobby.max_per_team * 2
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            if ps.name == lobby.admin:
+                self._notify(
+                    member,
+                    self._t("LOBBY_PLAYER_LEFT_ADMIN").format(leaver_name, count, max_players),
+                )
+            else:
+                self._notify(
+                    member,
+                    self._t("LOBBY_PLAYER_LEFT").format(leaver_name, count, max_players),
+                )
+        self._refresh_lobby_menus(lobby)
+
     def _killer_name_from_source(self, source: Any) -> Optional[str]:
         if source is None:
             return None
@@ -780,6 +1163,119 @@ class ARCShooterGamePlugin(Plugin):
             return self._mode_label(lobby.mode)
         return self._t("LOBBY_LIST_NO_MODE")
 
+    def _team_name_tag(self, player_name: str, team_id: str) -> str:
+        color = TEAM_NAME_COLOR.get(team_id, "§f")
+        return f"{color}{player_name}"
+
+    def _apply_team_name_tag(self, player: Player, lobby: Lobby) -> None:
+        ps = lobby.players.get(player.name)
+        if ps is None:
+            return
+        if player.name not in self._saved_name_tags:
+            self._saved_name_tags[player.name] = str(getattr(player, "name_tag", "") or "")
+        try:
+            player.name_tag = self._team_name_tag(player.name, ps.team)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] set name_tag for {player.name}: {e}")
+
+    def _restore_name_tag(self, player: Player) -> None:
+        saved = self._saved_name_tags.pop(player.name, None)
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+            if core is not None and hasattr(core, "_update_player_name_tag"):
+                core._update_player_name_tag(player)
+                return
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] restore name_tag via arc_core for {player.name}: {e}")
+        if saved is not None:
+            try:
+                player.name_tag = saved
+            except Exception:
+                pass
+
+    def _apply_lobby_name_tags(self, lobby: Lobby) -> None:
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is not None:
+                self._apply_team_name_tag(member, lobby)
+
+    def _refresh_lobby_menus(self, lobby: Lobby, delay: int = 5) -> None:
+        if lobby.state != STATE_LOBBY:
+            return
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is not None:
+                self._schedule_lobby_menu(member, lobby, delay=delay)
+
+    def _reason_status_text(self, reason: str) -> str:
+        key_map = {
+            "reason_missing_region": "MAP_STATUS_MISSING_REGION",
+            "reason_no_modes": "MAP_STATUS_NO_MODES",
+            "reason_missing_spawn_a": "MAP_STATUS_MISSING_SPAWN_A",
+            "reason_missing_spawn_b": "MAP_STATUS_MISSING_SPAWN_B",
+            "reason_unimplemented": "MAP_STATUS_UNIMPLEMENTED",
+            "reason_mode_not_found": "MAP_STATUS_MODE_NOT_FOUND",
+        }
+        return self._t(key_map.get(reason, "MAP_STATUS_MODE_NOT_FOUND"))
+
+    def _map_status_label(self, map_cfg: Dict[str, Any]) -> str:
+        if playable_modes(map_cfg):
+            return self._t("MAP_STATUS_READY")
+        reasons = map_incomplete_reasons(map_cfg)
+        if not reasons:
+            return self._t("MAP_STATUS_READY")
+        return self._reason_status_text(reasons[0])
+
+    def _mode_button_label(self, map_cfg: Dict[str, Any], mode: str) -> str:
+        mode_cfg = get_mode_config(map_cfg, mode)
+        minutes = int(mode_cfg.get("match_time_minutes") or 5) if mode_cfg else 5
+        label = self._mode_label(mode)
+        if mode_playable(map_cfg, mode):
+            return self._t("MODE_BUTTON_READY").format(label, minutes)
+        reasons = mode_incomplete_reasons(map_cfg, mode)
+        issue = self._reason_status_text(reasons[0]) if reasons else self._t("MAP_STATUS_MODE_NOT_FOUND")
+        return self._t("MODE_BUTTON_ISSUE").format(label, issue)
+
+    def _format_map_pos(self, point: Any) -> str:
+        if not point or not isinstance(point, dict):
+            return self._t("MAP_POS_UNSET")
+        try:
+            return self._t("MAP_POS_FMT").format(float(point["x"]), float(point["y"]), float(point["z"]))
+        except (KeyError, TypeError, ValueError):
+            return self._t("MAP_POS_UNSET")
+
+    def _map_mode_status_lines(self, map_cfg: Dict[str, Any]) -> str:
+        lines: List[str] = []
+        for mode_cfg in map_cfg.get("modes") or []:
+            mode = str(mode_cfg.get("mode") or "")
+            label = self._mode_label(mode)
+            if mode_playable(map_cfg, mode):
+                minutes = int(mode_cfg.get("match_time_minutes") or 5)
+                lines.append(self._t("MAP_MODE_LINE_READY").format(label, minutes))
+            else:
+                reasons = mode_incomplete_reasons(map_cfg, mode)
+                issue = self._reason_status_text(reasons[0]) if reasons else self._t("MAP_STATUS_MODE_NOT_FOUND")
+                lines.append(self._t("MAP_MODE_LINE").format(label, issue))
+        return "\n".join(lines) if lines else self._t("MAP_MODES_NONE")
+
+    def _lobby_hint_text(self, lobby: Lobby) -> str:
+        if not lobby.map_id:
+            return self._t("LOBBY_CONTENT_HINT").format(self._t("LOBBY_HINT_NEED_MAP"))
+        if not lobby.mode:
+            return self._t("LOBBY_CONTENT_HINT").format(self._t("LOBBY_HINT_NEED_MODE"))
+        return self._t("LOBBY_CONTENT_HINT").format(self._t("LOBBY_HINT_READY"))
+
+    def _map_select_button_label(self, map_cfg: Dict[str, Any]) -> str:
+        name = str(map_cfg.get("display_name") or map_cfg["id"])
+        modes = playable_modes(map_cfg)
+        if len(modes) == 1:
+            mode_cfg = get_mode_config(map_cfg, modes[0])
+            minutes = int(mode_cfg.get("match_time_minutes") or 5) if mode_cfg else 5
+            return self._t("MAP_SELECT_BUTTON_DETAIL").format(name, self._mode_label(modes[0]), minutes)
+        if len(modes) > 1:
+            return self._t("MAP_SELECT_BUTTON_MULTI").format(name, len(modes))
+        return self._t("MAP_SELECT_BUTTON").format(name)
+
     # ---------- shop ----------
 
     def _buy_weapon(self, player: Player, weapon_id: str) -> None:
@@ -801,7 +1297,17 @@ class ARCShooterGamePlugin(Plugin):
             self._show_shop_category(player, weapon["type"])
             return
         layout = self.config_store.layout()
-        start, end = slot_range(layout, weapon["type"])
+        wtype = weapon["type"]
+        if wtype == "armor":
+            _, old_id = lobby.record_purchase(player.name, weapon, 1)
+            ps.points -= cost
+            if old_id and old_id in self.config_store.weapons:
+                remove_armor_extras(player, self.config_store.weapons[old_id].get("extras") or {})
+            apply_armor_extras(player, weapon.get("extras") or {}, int(weapon.get("data") or 0))
+            player.send_message(self._t("BUY_OK").format(weapon["display_name"], ps.points))
+            self._show_shop_category(player, "armor")
+            return
+        start, end = slot_range(layout, wtype)
         capacity = end - start
         if capacity <= 0:
             player.send_message(self._t("SHOP_NO_SLOT"))
@@ -817,6 +1323,7 @@ class ARCShooterGamePlugin(Plugin):
         reserved = int(layout["reserved"])
         for extra_id, extra_count in (weapon.get("extras") or {}).items():
             give_to_end_slots(player, extra_id, extra_count, reserved, 0)
+        self._apply_weapon_ammo(player, weapon)
         player.send_message(self._t("BUY_OK").format(weapon["display_name"], ps.points))
         self._show_shop_category(player, weapon["type"])
 
@@ -865,21 +1372,36 @@ class ARCShooterGamePlugin(Plugin):
 
     def _show_lobby_menu(self, player: Player, lobby: Lobby) -> None:
         try:
-            content = self._t("LOBBY_CONTENT").format(
-                self._lobby_map_label(lobby),
-                self._lobby_mode_label(lobby),
-                lobby.admin or "-",
-                self._lobby_remaining_text(lobby),
-                lobby.target_score if lobby.map_cfg else "-",
-                lobby.max_per_team if lobby.map_cfg else "-",
-                self._team_block(lobby, TEAM_A),
-                self._team_block(lobby, TEAM_B),
+            count = lobby.player_count()
+            max_players = lobby.max_per_team * 2
+            player_list = "、".join(ps.name for ps in lobby.online_players()) or self._t("NO_PLAYER")
+            content = (
+                self._t("LOBBY_PLAYER_COUNT").format(count, max_players)
+                + "\n"
+                + self._t("LOBBY_PLAYER_LIST").format(player_list)
+                + "\n\n"
+                + self._lobby_hint_text(lobby)
+                + "\n\n"
+                + self._t("LOBBY_CONTENT").format(
+                    self._lobby_map_label(lobby),
+                    self._lobby_mode_label(lobby),
+                    lobby.admin or "-",
+                    self._lobby_remaining_text(lobby),
+                    lobby.target_score if lobby.map_cfg else "-",
+                    lobby.match_time_minutes if lobby.map_cfg else "-",
+                    lobby.max_per_team if lobby.map_cfg else "-",
+                    self._team_block(lobby, TEAM_A),
+                    self._team_block(lobby, TEAM_B),
+                )
             )
             form = ActionForm(title=self._t("LOBBY_TITLE"), content=content)
             is_admin = lobby.admin == player.name
             if is_admin:
-                form.add_button(self._t("BTN_SELECT_MAP"), on_click=lambda sender, lb=lobby: self._show_map_select(sender, lb))
-                form.add_button(self._t("BTN_SELECT_MODE"), on_click=lambda sender, lb=lobby: self._show_mode_select(sender, lb))
+                map_mode_btn = self._t("BTN_CHANGE_MAP_MODE") if lobby.map_cfg else self._t("BTN_SELECT_MAP_MODE")
+                form.add_button(
+                    map_mode_btn,
+                    on_click=lambda sender, lb=lobby: self._show_map_select(sender, lb),
+                )
                 form.add_button(self._t("BTN_START"), on_click=lambda sender, lb=lobby: self._start_match(sender, lb))
                 form.add_button(self._t("BTN_ASSIGN"), on_click=lambda sender, lb=lobby: self._show_assign_menu(sender, lb))
                 form.add_button(self._t("BTN_KICK"), on_click=lambda sender, lb=lobby: self._show_kick_menu(sender, lb))
@@ -911,7 +1433,7 @@ class ARCShooterGamePlugin(Plugin):
             return
         form = ActionForm(title=self._t("MAP_SELECT_TITLE"), content=self._t("MAP_SELECT_CONTENT"))
         for map_cfg in candidates:
-            label = self._t("MAP_SELECT_BUTTON").format(map_cfg.get("display_name") or map_cfg["id"])
+            label = self._map_select_button_label(map_cfg)
             mid = map_cfg["id"]
             form.add_button(label, on_click=lambda sender, lb=lobby, m=mid: self._select_map(sender, lb, m))
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
@@ -929,6 +1451,14 @@ class ARCShooterGamePlugin(Plugin):
             self._show_map_select(player, lobby)
             return
         lobby.map_id = map_id
+        modes = playable_modes(map_cfg)
+        if len(modes) == 1:
+            ok, _reason = lobby.set_map_and_mode(map_cfg, modes[0])
+            if ok:
+                player.send_message(self._t("MAP_SELECT_OK").format(map_cfg.get("display_name") or map_id))
+                player.send_message(self._t("MODE_SELECT_OK").format(self._mode_label(modes[0])))
+                self._show_lobby_menu(player, lobby)
+                return
         lobby.mode = None
         lobby.map_cfg = None
         player.send_message(self._t("MAP_SELECT_OK").format(map_cfg.get("display_name") or map_id))
@@ -1002,9 +1532,15 @@ class ARCShooterGamePlugin(Plugin):
         ok, reason = lobby.set_team(target_name, other)
         if not ok and reason == "full":
             player.send_message(self._t("ASSIGN_TEAM_FULL"))
+            self._show_assign_menu(player, lobby)
         elif ok:
             player.send_message(self._t("ASSIGN_DONE").format(target_name, lobby.team_name(other)))
-        self._show_assign_menu(player, lobby)
+            target = self._get_player(target_name)
+            if target is not None:
+                self._apply_team_name_tag(target, lobby)
+            self._refresh_lobby_menus(lobby)
+        else:
+            self._show_assign_menu(player, lobby)
 
     def _show_kick_menu(self, player: Player, lobby: Lobby) -> None:
         if lobby.admin != player.name or lobby.state != STATE_LOBBY:
@@ -1027,8 +1563,11 @@ class ARCShooterGamePlugin(Plugin):
         self.player_to_lobby.pop(target_name, None)
         target = self._get_player(target_name)
         if target:
+            self._restore_name_tag(target)
             target.send_message(self._t("KICKED"))
+            self._schedule_root_menu(target)
         admin.send_message(self._t("KICK_OK").format(target_name))
+        self._notify_lobby_members_left(lobby, target_name)
         self._show_kick_menu(admin, lobby)
 
     def _show_match_menu(self, player: Player, lobby: Lobby) -> None:
@@ -1081,6 +1620,7 @@ class ARCShooterGamePlugin(Plugin):
         )
         form.add_button(self._t("SHOP_PRIMARY"), on_click=lambda sender: self._show_shop_category(sender, "primary"))
         form.add_button(self._t("SHOP_SECONDARY"), on_click=lambda sender: self._show_shop_category(sender, "secondary"))
+        form.add_button(self._t("SHOP_ARMOR"), on_click=lambda sender: self._show_shop_category(sender, "armor"))
         form.add_button(self._t("SHOP_GADGET"), on_click=lambda sender: self._show_shop_category(sender, "gadget"))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
         player.send_form(form)
@@ -1096,6 +1636,7 @@ class ARCShooterGamePlugin(Plugin):
         title_map = {
             "primary": self._t("SHOP_PRIMARY"),
             "secondary": self._t("SHOP_SECONDARY"),
+            "armor": self._t("SHOP_ARMOR"),
             "gadget": self._t("SHOP_GADGET"),
         }
         weapons = self.config_store.weapons_of_type(weapon_type)
@@ -1111,7 +1652,7 @@ class ARCShooterGamePlugin(Plugin):
             form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
             player.send_form(form)
             return
-        owned = set(filter(None, [ps.primary_id, ps.secondary_id, *ps.gadgets]))
+        owned = set(filter(None, [ps.primary_id, ps.secondary_id, ps.armor_id, *ps.gadgets]))
         for weapon in weapons:
             owned_mark = self._t("SHOP_OWNED") if weapon["id"] in owned else ""
             label = self._t("SHOP_ITEM").format(weapon["display_name"], weapon["cost"], owned_mark)
@@ -1131,7 +1672,8 @@ class ARCShooterGamePlugin(Plugin):
         content = self._t("CONFIG_MAPS_CONTENT") if maps else self._t("CONFIG_MAPS_EMPTY")
         form = ActionForm(title=self._t("CONFIG_MAPS_TITLE"), content=content)
         for map_cfg in maps:
-            label = self._t("CONFIG_MAP_BUTTON").format(map_cfg.get("display_name") or map_cfg["id"])
+            name = str(map_cfg.get("display_name") or map_cfg["id"])
+            label = self._t("CONFIG_MAP_BUTTON_STATUS").format(name, self._map_status_label(map_cfg))
             mid = map_cfg["id"]
             form.add_button(label, on_click=lambda sender, m=mid: self._show_map_edit(sender, m))
         form.add_button(self._t("BTN_CREATE_MAP"), on_click=lambda sender: self._show_create_map_form(sender))
@@ -1176,24 +1718,26 @@ class ARCShooterGamePlugin(Plugin):
         if map_cfg is None:
             self._show_config_maps(player)
             return
-        region_text = self._t("MAP_REGION_SET") if has_region(map_cfg) else self._t("MAP_REGION_NONE")
-        mode_names = [self._mode_label(str(m.get("mode") or "")) for m in map_cfg.get("modes") or []]
-        modes_text = "、".join(mode_names) if mode_names else self._t("MAP_MODES_NONE")
-        content = self._t("MAP_EDIT_CONTENT").format(
+        region = map_cfg.get("region") or {}
+        pos1_text = self._format_map_pos(region.get("pos1"))
+        pos2_text = self._format_map_pos(region.get("pos2"))
+        modes_text = self._map_mode_status_lines(map_cfg)
+        content = self._t("MAP_EDIT_BODY").format(
             map_cfg.get("dimension") or "overworld",
-            region_text,
+            pos1_text,
+            pos2_text,
             modes_text,
         )
         form = ActionForm(title=self._t("MAP_EDIT_TITLE").format(map_cfg.get("display_name") or map_id), content=content)
         form.add_button(self._t("BTN_SET_POS1"), on_click=lambda sender, m=map_id: self._set_map_pos(sender, m, 1))
         form.add_button(self._t("BTN_SET_POS2"), on_click=lambda sender, m=map_id: self._set_map_pos(sender, m, 2))
+        for mode_cfg in map_cfg.get("modes") or []:
+            mode = str(mode_cfg.get("mode") or "")
+            label = self._mode_button_label(map_cfg, mode)
+            form.add_button(label, on_click=lambda sender, mid=map_id, md=mode: self._show_mode_edit(sender, mid, md))
         form.add_button(self._t("BTN_ADD_MODE"), on_click=lambda sender, m=map_id: self._show_add_mode_form(sender, m))
         form.add_button(self._t("BTN_RENAME_MAP"), on_click=lambda sender, m=map_id: self._show_rename_map_form(sender, m))
         form.add_button(self._t("BTN_DELETE_MAP"), on_click=lambda sender, m=map_id: self._show_delete_map_confirm(sender, m))
-        for mode_cfg in map_cfg.get("modes") or []:
-            mode = str(mode_cfg.get("mode") or "")
-            label = self._mode_label(mode)
-            form.add_button(label, on_click=lambda sender, mid=map_id, md=mode: self._show_mode_edit(sender, mid, md))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_config_maps(sender))
         player.send_form(form)
 
@@ -1292,6 +1836,7 @@ class ARCShooterGamePlugin(Plugin):
                     "mode": mode,
                     "max_players_per_team": 8,
                     "target_score": 50,
+                    "match_time_minutes": 5,
                     "teams": {
                         "a": {"name": "红队", "spawns": []},
                         "b": {"name": "蓝队", "spawns": []},
@@ -1317,17 +1862,7 @@ class ARCShooterGamePlugin(Plugin):
             self._show_map_edit(player, map_id)
             return
         if len(available) == 1:
-            mode = available[0]
-            form = ActionForm(
-                title=self._t("ADD_MODE_TITLE"),
-                content=self._t("MODE_SELECT_BUTTON").format(self._mode_label(mode)),
-            )
-            form.add_button(
-                self._t("BTN_CONFIRM"),
-                on_click=lambda sender, m=map_id, md=mode: self._add_mode_to_map(sender, m, md),
-            )
-            form.add_button(self._t("BTN_CANCEL"), on_click=lambda sender, m=map_id: self._show_map_edit(sender, m))
-            player.send_form(form)
+            self._add_mode_to_map(player, map_id, available[0])
             return
 
         options = [self._mode_label(mode) for mode in available]
@@ -1361,25 +1896,69 @@ class ARCShooterGamePlugin(Plugin):
         teams = mode_cfg.get("teams") or {}
         a_count = len((teams.get("a") or {}).get("spawns") or [])
         b_count = len((teams.get("b") or {}).get("spawns") or [])
-        content = self._t("MODE_EDIT_CONTENT").format(
+        status = self._t("MODE_STATUS_READY") if mode_playable(map_cfg, mode) else self._reason_status_text(
+            mode_incomplete_reasons(map_cfg, mode)[0]
+            if mode_incomplete_reasons(map_cfg, mode)
+            else "reason_mode_not_found"
+        )
+        content = self._t("MODE_EDIT_BODY").format(
             mode_cfg.get("target_score", 50),
             mode_cfg.get("max_players_per_team", 8),
+            mode_cfg.get("match_time_minutes", 5),
             a_count,
             b_count,
+            status,
         )
         form = ActionForm(title=self._t("MODE_EDIT_TITLE").format(self._mode_label(mode)), content=content)
-        form.add_button(self._t("BTN_ADD_SPAWN_A"), on_click=lambda sender, m=map_id, md=mode: self._add_spawn(sender, m, md, TEAM_A))
-        form.add_button(self._t("BTN_ADD_SPAWN_B"), on_click=lambda sender, m=map_id, md=mode: self._add_spawn(sender, m, md, TEAM_B))
-        form.add_button(self._t("BTN_EDIT_MODE_SETTINGS"), on_click=lambda sender, m=map_id, md=mode: self._show_mode_settings_form(sender, m, md))
-        for team_id in (TEAM_A, TEAM_B):
-            team = teams.get(team_id) or {}
-            for idx, spawn in enumerate(team.get("spawns") or []):
-                label = self._t("BTN_DELETE_SPAWN").format(idx + 1, team.get("name") or team_id)
-                form.add_button(
-                    label,
-                    on_click=lambda sender, m=map_id, md=mode, t=team_id, i=idx: self._remove_spawn(sender, m, md, t, i),
-                )
+        form.add_button(
+            self._t("BTN_EDIT_RULES"),
+            on_click=lambda sender, m=map_id, md=mode: self._show_mode_settings_form(sender, m, md),
+        )
+        form.add_button(
+            self._t("BTN_MANAGE_SPAWN_A"),
+            on_click=lambda sender, m=map_id, md=mode: self._show_spawn_edit(sender, m, md, TEAM_A),
+        )
+        form.add_button(
+            self._t("BTN_MANAGE_SPAWN_B"),
+            on_click=lambda sender, m=map_id, md=mode: self._show_spawn_edit(sender, m, md, TEAM_B),
+        )
         form.add_button(self._t("BACK"), on_click=lambda sender, m=map_id: self._show_map_edit(sender, m))
+        player.send_form(form)
+
+    def _show_spawn_edit(self, player: Player, map_id: str, mode: str, team_id: str) -> None:
+        assert self.config_store is not None
+        map_cfg = self.config_store.maps.get(map_id)
+        mode_cfg = get_mode_config(map_cfg or {}, mode) if map_cfg else None
+        if map_cfg is None or mode_cfg is None:
+            self._show_mode_edit(player, map_id, mode)
+            return
+        teams = mode_cfg.get("teams") or {}
+        team = teams.get(team_id) or {}
+        spawns = list(team.get("spawns") or [])
+        team_name = str(team.get("name") or ("红队" if team_id == TEAM_A else "蓝队"))
+        lines = [
+            self._t("SPAWN_EDIT_LINE").format(idx + 1, spawn.get("x", 0), spawn.get("y", 0), spawn.get("z", 0))
+            for idx, spawn in enumerate(spawns)
+        ]
+        body_text = "\n".join(lines) if lines else self._t("SPAWN_EDIT_EMPTY")
+        content = self._t("SPAWN_EDIT_BODY").format(len(spawns), body_text)
+        form = ActionForm(title=self._t("SPAWN_EDIT_TITLE").format(team_name), content=content)
+        form.add_button(
+            self._t("BTN_ADD_SPAWN_HERE"),
+            on_click=lambda sender, m=map_id, md=mode, t=team_id: self._add_spawn(sender, m, md, t),
+        )
+        for idx, spawn in enumerate(spawns):
+            label = self._t("BTN_DELETE_SPAWN_COORD").format(
+                idx + 1,
+                float(spawn.get("x", 0)),
+                float(spawn.get("y", 0)),
+                float(spawn.get("z", 0)),
+            )
+            form.add_button(
+                label,
+                on_click=lambda sender, m=map_id, md=mode, t=team_id, i=idx: self._remove_spawn(sender, m, md, t, i),
+            )
+        form.add_button(self._t("BACK"), on_click=lambda sender, m=map_id, md=mode: self._show_mode_edit(sender, m, md))
         player.send_form(form)
 
     def _add_spawn(self, player: Player, map_id: str, mode: str, team_id: str) -> None:
@@ -1398,7 +1977,7 @@ class ARCShooterGamePlugin(Plugin):
         self.config_store.update_map(map_id, updater)
         team_name = "红队" if team_id == TEAM_A else "蓝队"
         player.send_message(self._t("SPAWN_ADDED").format(team_name))
-        self._show_mode_edit(player, map_id, mode)
+        self._show_spawn_edit(player, map_id, mode, team_id)
 
     def _remove_spawn(self, player: Player, map_id: str, mode: str, team_id: str, index: int) -> None:
         assert self.config_store is not None
@@ -1416,7 +1995,7 @@ class ARCShooterGamePlugin(Plugin):
 
         self.config_store.update_map(map_id, updater)
         player.send_message(self._t("SPAWN_REMOVED"))
-        self._show_mode_edit(player, map_id, mode)
+        self._show_spawn_edit(player, map_id, mode, team_id)
 
     def _show_mode_settings_form(self, player: Player, map_id: str, mode: str) -> None:
         assert self.config_store is not None
@@ -1431,6 +2010,7 @@ class ARCShooterGamePlugin(Plugin):
             try:
                 target = max(1, int(str(data[0] or "50")))
                 max_team = max(1, int(str(data[1] or "8")))
+                match_minutes = max(1, int(str(data[2] or "5")))
             except ValueError:
                 p.send_message(self._t("CREATE_MAP_FAIL").format("invalid number"))
                 self._show_mode_edit(p, map_id, mode)
@@ -1442,6 +2022,7 @@ class ARCShooterGamePlugin(Plugin):
                         continue
                     mode_item["target_score"] = target
                     mode_item["max_players_per_team"] = max_team
+                    mode_item["match_time_minutes"] = match_minutes
 
             self.config_store.update_map(map_id, updater)
             p.send_message(self._t("MODE_SETTINGS_OK"))
@@ -1452,6 +2033,10 @@ class ARCShooterGamePlugin(Plugin):
             controls=[
                 TextInput(label=self._t("MODE_SETTINGS_TARGET"), default_value=str(mode_cfg.get("target_score", 50))),
                 TextInput(label=self._t("MODE_SETTINGS_MAX"), default_value=str(mode_cfg.get("max_players_per_team", 8))),
+                TextInput(
+                    label=self._t("MODE_SETTINGS_MATCH_TIME"),
+                    default_value=str(mode_cfg.get("match_time_minutes", 5)),
+                ),
             ],
             on_submit=on_submit,
         )

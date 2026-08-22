@@ -38,6 +38,10 @@ ENV/
 # Wheels
 wheelhouse/
 
+# Local plugin runtime data (not templates)
+plugins/ARCShooterGame/shooter.db
+plugins/ARCShooterGame/maps.json
+
 # Tests
 .pytest_cache/
 .coverage

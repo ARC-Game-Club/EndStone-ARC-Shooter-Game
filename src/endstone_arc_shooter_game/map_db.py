@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS map_modes (
     mode TEXT NOT NULL,
     max_players_per_team INTEGER NOT NULL DEFAULT 8,
     target_score INTEGER NOT NULL DEFAULT 50,
+    match_time_minutes INTEGER NOT NULL DEFAULT 5,
     team_a_name TEXT NOT NULL DEFAULT '红队',
     team_b_name TEXT NOT NULL DEFAULT '蓝队',
     PRIMARY KEY (map_id, mode),
@@ -65,7 +66,15 @@ class MapDatabase:
 
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
+        self._ensure_columns()
         self._conn.commit()
+
+    def _ensure_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(map_modes)").fetchall()}
+        if "match_time_minutes" not in cols:
+            self._conn.execute(
+                "ALTER TABLE map_modes ADD COLUMN match_time_minutes INTEGER NOT NULL DEFAULT 5"
+            )
 
     def _migrate_from_json_if_needed(self) -> None:
         json_path = PLUGIN_DATA_DIR / "maps.json"
@@ -142,6 +151,9 @@ class MapDatabase:
                         "mode": mode,
                         "max_players_per_team": mode_row["max_players_per_team"],
                         "target_score": mode_row["target_score"],
+                        "match_time_minutes": mode_row["match_time_minutes"]
+                        if "match_time_minutes" in mode_row.keys()
+                        else 5,
                         "teams": teams,
                     }
                 )
@@ -192,14 +204,16 @@ class MapDatabase:
                 self._conn.execute(
                     """
                     INSERT INTO map_modes (
-                        map_id, mode, max_players_per_team, target_score, team_a_name, team_b_name
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        map_id, mode, max_players_per_team, target_score, match_time_minutes,
+                        team_a_name, team_b_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         map_id,
                         mode,
                         mode_cfg.get("max_players_per_team", 8),
                         mode_cfg.get("target_score", 50),
+                        mode_cfg.get("match_time_minutes", 5),
                         team_a.get("name", "红队"),
                         team_b.get("name", "蓝队"),
                     ),

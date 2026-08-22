@@ -5,7 +5,10 @@ import unittest
 from endstone_arc_shooter_game.config import (
     ConfigStore,
     build_runtime_map_cfg,
+    map_incomplete_reasons,
     migrate_legacy_map,
+    match_kd_score,
+    mode_incomplete_reasons,
     mode_playable,
     normalize_map,
     normalize_weapon,
@@ -45,6 +48,7 @@ def sample_map():
                     "mode": "tdm",
                     "max_players_per_team": 2,
                     "target_score": 3,
+                    "match_time_minutes": 5,
                     "teams": {
                         "a": {"name": "红队", "spawns": [{"x": 0, "y": 64, "z": 0, "radius": 0}]},
                         "b": {"name": "蓝队", "spawns": [{"x": 10, "y": 64, "z": 0, "radius": 5}]},
@@ -83,7 +87,14 @@ class ConfigValidateTests(unittest.TestCase):
         errors = validate_map({"id": "x", "display_name": "x"})
         self.assertTrue(errors)
 
-    def test_playable_mode_requires_region_and_spawns(self):
+    def test_runtime_map_includes_match_time(self):
+        cfg = sample_map()
+        runtime = build_runtime_map_cfg(cfg, "tdm")
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime["match_time_minutes"], 5)
+        cfg["modes"][0]["match_time_minutes"] = 12
+        runtime2 = build_runtime_map_cfg(cfg, "tdm")
+        self.assertEqual(runtime2["match_time_minutes"], 12)
         cfg = sample_map()
         self.assertTrue(mode_playable(cfg, "tdm"))
         self.assertIn("tdm", playable_modes(cfg))
@@ -96,6 +107,41 @@ class ConfigValidateTests(unittest.TestCase):
         self.assertTrue(point_in_region(cfg, 5, 64, 5))
         self.assertFalse(point_in_region(cfg, 100, 64, 5))
 
+    def test_mode_incomplete_reasons(self):
+        cfg = sample_map()
+        self.assertEqual(mode_incomplete_reasons(cfg, "tdm"), [])
+        cfg_no_region = normalize_map(
+            {
+                "id": "x",
+                "display_name": "x",
+                "modes": cfg["modes"],
+            }
+        )
+        self.assertIn("reason_missing_region", mode_incomplete_reasons(cfg_no_region, "tdm"))
+        cfg_no_b = sample_map()
+        cfg_no_b["modes"][0]["teams"]["b"]["spawns"] = []
+        self.assertIn("reason_missing_spawn_b", mode_incomplete_reasons(cfg_no_b, "tdm"))
+
+    def test_map_incomplete_reasons(self):
+        cfg = sample_map()
+        self.assertEqual(map_incomplete_reasons(cfg), [])
+        cfg_no_region = normalize_map({"id": "x", "display_name": "x", "modes": cfg["modes"]})
+        self.assertIn("reason_missing_region", map_incomplete_reasons(cfg_no_region))
+        cfg_empty = normalize_map({"id": "y", "display_name": "y", "modes": []})
+        self.assertIn("reason_no_modes", map_incomplete_reasons(cfg_empty))
+
+    def test_single_playable_mode_auto_bind(self):
+        cfg = sample_map()
+        modes = playable_modes(cfg)
+        self.assertEqual(modes, ["tdm"])
+        lobby = Lobby(admin="alice")
+        ok, _ = lobby.set_map_and_mode(cfg, modes[0])
+        self.assertTrue(ok)
+        self.assertEqual(lobby.mode, "tdm")
+        self.assertIsNotNone(lobby.map_cfg)
+        assert lobby.map_cfg is not None
+        self.assertEqual(lobby.map_cfg.get("match_time_minutes"), 5)
+
     def test_weapon_type_and_extras(self):
         errors = validate_weapon(
             {"id": "ak", "item": "custom:ak", "type": "primary", "cost": 10, "extras": {"custom:ammo": 30}}
@@ -105,6 +151,21 @@ class ConfigValidateTests(unittest.TestCase):
             {"id": "ak", "item": "custom:ak", "type": "primary", "cost": 10, "extras": {"custom:ammo": 30}}
         )
         self.assertEqual(weapon["extras"]["custom:ammo"], 30)
+
+    def test_weapon_ammo_scoreboard(self):
+        weapon = normalize_weapon(
+            {
+                "id": "ak47",
+                "item": "trenbankai:ak47",
+                "type": "primary",
+                "cost": 900,
+                "default_ammo": 30,
+            }
+        )
+        self.assertEqual(weapon["ammo_scoreboard"], "ak47")
+        self.assertEqual(weapon["default_ammo"], 30)
+        plain = normalize_weapon({"id": "iron_sword", "item": "minecraft:iron_sword", "type": "secondary", "cost": 100})
+        self.assertNotIn("ammo_scoreboard", plain)
 
     def test_reject_bad_weapon_type(self):
         errors = validate_weapon({"id": "x", "item": "minecraft:stick", "type": "ultimate"})
@@ -272,6 +333,59 @@ class LobbyTests(unittest.TestCase):
         self.assertEqual(first_empty_or_first([None, "a"], 2), 0)
         self.assertEqual(first_empty_or_first(["a", None], 2), 1)
         self.assertEqual(first_empty_or_first(["a", "b"], 2), 0)
+
+    def test_match_timeout_by_score(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.begin_buy(0, now=3)
+        lobby.begin_playing(300, now=10)
+        lobby.score_a = 5
+        lobby.score_b = 3
+        self.assertTrue(lobby.match_timed_out(now=310))
+        self.assertEqual(lobby.winner_by_score(), TEAM_A)
+        lobby.score_b = 5
+        self.assertIsNone(lobby.winner_by_score())
+
+    def test_armor_purchase_record(self):
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=1)
+        armor = {"id": "iron_armor", "type": "armor"}
+        idx, old = lobby.record_purchase("alice", armor, 1)
+        self.assertEqual(idx, 0)
+        self.assertIsNone(old)
+        self.assertEqual(lobby.players["alice"].armor_id, "iron_armor")
+        idx2, old2 = lobby.record_purchase("alice", {"id": "diamond_armor", "type": "armor"}, 1)
+        self.assertEqual(old2, "iron_armor")
+        self.assertEqual(lobby.players["alice"].armor_id, "diamond_armor")
+
+    def test_mode_match_time_from_runtime_map(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        assert lobby.map_cfg is not None
+        lobby.map_cfg["match_time_minutes"] = 8
+        self.assertEqual(lobby.match_time_minutes, 8)
+        self.assertEqual(lobby.match_time_seconds, 480)
+        lobby.begin_buy(0, now=3)
+        lobby.begin_playing(lobby.match_time_seconds, now=10)
+        self.assertFalse(lobby.match_timed_out(now=100))
+        self.assertTrue(lobby.match_timed_out(now=490))
+
+    def test_match_kd_score(self):
+        self.assertEqual(match_kd_score(5, 2), 3)
+        self.assertEqual(match_kd_score(2, 5), 0)
+        self.assertEqual(match_kd_score(3, 3), 0)
+
+    def test_match_reward_amounts(self):
+        store = ConfigStore.__new__(ConfigStore)
+        store.settings = type("S", (), {"GetSettingInt": lambda self, key, default=0: {
+            "WIN_GUILD_CONTRIBUTION_PER_KD": 10,
+            "MATCH_MONEY_PER_KD": 100,
+        }.get(key, default)})()
+        kd = match_kd_score(8, 3)
+        self.assertEqual(kd * store.match_money_per_kd(), 500)
+        self.assertEqual(kd * store.win_guild_contribution_per_kd(), 50)
 
 
 class MapOccupancyTests(unittest.TestCase):

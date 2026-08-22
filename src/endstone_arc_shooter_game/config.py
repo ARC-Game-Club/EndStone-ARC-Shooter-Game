@@ -11,7 +11,7 @@ from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 IMPLEMENTED_MODES = {"tdm"}
 KNOWN_MODES = ("tdm", "ffa", "ctf")
-WEAPON_TYPES = ("primary", "secondary", "gadget")
+WEAPON_TYPES = ("primary", "secondary", "gadget", "armor")
 
 DEFAULT_SETTINGS = {
     "DEFAULT_LANGUAGE_CODE": "ZH-CN",
@@ -22,6 +22,9 @@ DEFAULT_SETTINGS = {
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
     "BUY_TIME_SECONDS": "10",
+    "MATCH_TIME_SECONDS": "300",
+    "WIN_GUILD_CONTRIBUTION_PER_KD": "10",
+    "MATCH_MONEY_PER_KD": "100",
 }
 
 DEFAULT_MAPS = {
@@ -30,30 +33,33 @@ DEFAULT_MAPS = {
 }
 
 DEFAULT_WEAPONS = {
-    "_comment": "起始 1000 可买普通主+副；击杀 +50 攒点买高级枪/道具。",
+    "_comment": "起始 1000 可买普通主+副；击杀 +50 攒点。MP5/RPG 为副武器。",
     "weapons": [
-        {"id": "mp5a5", "display_name": "HK MP5-A5 冲锋枪", "item": "trenbankai:mp5a5", "cost": 500, "type": "primary", "extras": {"trenbankai:mp5a5_mag": 3}},
-        {"id": "aks74u", "display_name": "AKS-74U 短突击步枪", "item": "trenbankai:aks74u", "cost": 550, "type": "primary", "extras": {"trenbankai:ak74_mag": 2}},
-        {"id": "m4a1", "display_name": "M4A1 卡宾枪", "item": "trenbankai:m4a1", "cost": 650, "type": "primary", "extras": {"trenbankai:m4a1_mag": 2}},
-        {"id": "ak74", "display_name": "AK-74 突击步枪", "item": "trenbankai:ak74", "cost": 650, "type": "primary", "extras": {"trenbankai:ak74_mag": 2}},
-        {"id": "ak12", "display_name": "AK-12 突击步枪", "item": "trenbankai:ak12", "cost": 700, "type": "primary", "extras": {"trenbankai:ak12_mag": 2}},
-        {"id": "mossberg", "display_name": "莫斯伯格 500 霰弹枪", "item": "trenbankai:mossberg", "cost": 700, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 12}},
-        {"id": "ak47", "display_name": "AK-47 突击步枪", "item": "trenbankai:ak47", "cost": 900, "type": "primary", "extras": {"trenbankai:ak47_mag": 2}},
-        {"id": "akm", "display_name": "AKM 突击步枪", "item": "trenbankai:akm", "cost": 900, "type": "primary", "extras": {"trenbankai:akm_mag": 2}},
-        {"id": "m1014", "display_name": "M1014 霰弹枪", "item": "trenbankai:m1014", "cost": 1000, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 14}},
-        {"id": "parafal", "display_name": "ParaFAL 战斗步枪", "item": "trenbankai:parafal", "cost": 1050, "type": "primary", "extras": {"trenbankai:fnfal_mag": 2}},
-        {"id": "fnfal", "display_name": "FN FAL 战斗步枪", "item": "trenbankai:fnfal", "cost": 1150, "type": "primary", "extras": {"trenbankai:fnfal_mag": 2}},
-        {"id": "m249", "display_name": "M249 轻机枪", "item": "trenbankai:m249", "cost": 1300, "type": "primary", "extras": {"trenbankai:m249_mag": 1}},
-        {"id": "awp", "display_name": "AWP 狙击步枪", "item": "trenbankai:awp", "cost": 1450, "type": "primary", "extras": {"trenbankai:awp_mag": 2}},
-        {"id": "rpg7", "display_name": "RPG-7 火箭筒", "item": "trenbankai:rpg7", "cost": 1500, "type": "primary", "extras": {"trenbankai:rpg7_rocket": 2}},
-        {"id": "glock17", "display_name": "格洛克 17", "item": "trenbankai:glock17", "cost": 300, "type": "secondary", "extras": {"trenbankai:glock_mag": 2}},
-        {"id": "glock18", "display_name": "格洛克 18c", "item": "trenbankai:glock18", "cost": 550, "type": "secondary", "extras": {"trenbankai:glock_mag": 2}},
-        {"id": "deagle", "display_name": "沙漠之鹰", "item": "trenbankai:deagle", "cost": 800, "type": "secondary", "extras": {"trenbankai:deagle_mag": 2}},
-        {"id": "flare", "display_name": "信号弹", "item": "trenbankai:flare", "cost": 250, "type": "gadget", "amount": 2, "extras": {}},
-        {"id": "m84_grenade", "display_name": "M84 闪光弹", "item": "trenbankai:m84_grenade", "cost": 350, "type": "gadget", "amount": 1, "extras": {}},
-        {"id": "mk2_grenade", "display_name": "Mk 2 手榴弹", "item": "trenbankai:mk2_grenade", "cost": 450, "type": "gadget", "amount": 1, "extras": {}},
-        {"id": "l83a1_grenade", "display_name": "L83A1 手榴弹", "item": "trenbankai:l83a1_grenade", "cost": 450, "type": "gadget", "amount": 1, "extras": {}},
-        {"id": "landmine", "display_name": "地雷", "item": "trenbankai:landmine_item", "cost": 550, "type": "gadget", "amount": 1, "extras": {}},
+        {"id": "mp5a5", "display_name": "HK MP5-A5 冲锋枪", "item": "trenbankai:mp5a5", "cost": 500, "type": "secondary", "extras": {"trenbankai:mp5a5_mag": 9}, "ammo_scoreboard": "mp5a5", "default_ammo": 30},
+        {"id": "aks74u", "display_name": "AKS-74U 短突击步枪", "item": "trenbankai:aks74u", "cost": 550, "type": "primary", "extras": {"trenbankai:ak74_mag": 6}, "ammo_scoreboard": "aks74u", "default_ammo": 30},
+        {"id": "m4a1", "display_name": "M4A1 卡宾枪", "item": "trenbankai:m4a1", "cost": 650, "type": "primary", "extras": {"trenbankai:m4a1_mag": 6}, "ammo_scoreboard": "m4a1", "default_ammo": 30},
+        {"id": "ak74", "display_name": "AK-74 突击步枪", "item": "trenbankai:ak74", "cost": 650, "type": "primary", "extras": {"trenbankai:ak74_mag": 6}, "ammo_scoreboard": "ak74", "default_ammo": 30},
+        {"id": "ak12", "display_name": "AK-12 突击步枪", "item": "trenbankai:ak12", "cost": 700, "type": "primary", "extras": {"trenbankai:ak12_mag": 6}, "ammo_scoreboard": "ak12", "default_ammo": 30},
+        {"id": "mossberg", "display_name": "莫斯伯格 500 霰弹枪", "item": "trenbankai:mossberg", "cost": 700, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 36}, "ammo_scoreboard": "mossberg", "default_ammo": 6},
+        {"id": "shield", "display_name": "盾牌", "item": "minecraft:shield", "cost": 700, "type": "primary"},
+        {"id": "ak47", "display_name": "AK-47 突击步枪", "item": "trenbankai:ak47", "cost": 900, "type": "primary", "extras": {"trenbankai:ak47_mag": 6}, "ammo_scoreboard": "ak47", "default_ammo": 30},
+        {"id": "akm", "display_name": "AKM 突击步枪", "item": "trenbankai:akm", "cost": 900, "type": "primary", "extras": {"trenbankai:akm_mag": 6}, "ammo_scoreboard": "akm", "default_ammo": 30},
+        {"id": "m1014", "display_name": "M1014 霰弹枪", "item": "trenbankai:m1014", "cost": 1000, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 42}, "ammo_scoreboard": "m1014", "default_ammo": 7},
+        {"id": "parafal", "display_name": "ParaFAL 战斗步枪", "item": "trenbankai:parafal", "cost": 1050, "type": "primary", "extras": {"trenbankai:fnfal_mag": 6}, "ammo_scoreboard": "parafal", "default_ammo": 20},
+        {"id": "fnfal", "display_name": "FN FAL 战斗步枪", "item": "trenbankai:fnfal", "cost": 1150, "type": "primary", "extras": {"trenbankai:fnfal_mag": 6}, "ammo_scoreboard": "fnfal", "default_ammo": 20},
+        {"id": "m249", "display_name": "M249 轻机枪", "item": "trenbankai:m249", "cost": 1300, "type": "primary", "extras": {"trenbankai:m249_mag": 3}, "ammo_scoreboard": "m249", "default_ammo": 200},
+        {"id": "awp", "display_name": "AWP 狙击步枪", "item": "trenbankai:awp", "cost": 1450, "type": "primary", "extras": {"trenbankai:awp_mag": 6}, "ammo_scoreboard": "awp", "default_ammo": 10},
+        {"id": "rpg7", "display_name": "RPG-7 火箭筒", "item": "trenbankai:rpg7", "cost": 1500, "type": "secondary", "extras": {"trenbankai:rpg7_rocket": 6}, "ammo_scoreboard": "rpg7", "default_ammo": 1},
+        {"id": "glock17", "display_name": "格洛克 17", "item": "trenbankai:glock17", "cost": 300, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock17", "default_ammo": 17},
+        {"id": "iron_sword", "display_name": "铁剑", "item": "minecraft:iron_sword", "cost": 100, "type": "secondary"},
+        {"id": "glock18", "display_name": "格洛克 18c", "item": "trenbankai:glock18", "cost": 550, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock18", "default_ammo": 17},
+        {"id": "deagle", "display_name": "沙漠之鹰", "item": "trenbankai:deagle", "cost": 800, "type": "secondary", "extras": {"trenbankai:deagle_mag": 6}, "ammo_scoreboard": "deagle", "default_ammo": 10},
+        {"id": "iron_armor", "display_name": "铁甲全套", "item": "minecraft:iron_helmet", "cost": 500, "type": "armor", "extras": {"minecraft:iron_helmet": 1, "minecraft:iron_chestplate": 1, "minecraft:iron_leggings": 1, "minecraft:iron_boots": 1}},
+        {"id": "flare", "display_name": "信号弹", "item": "trenbankai:flare", "cost": 50, "type": "gadget", "amount": 2},
+        {"id": "m84_grenade", "display_name": "M84 闪光弹", "item": "trenbankai:m84_grenade", "cost": 70, "type": "gadget"},
+        {"id": "mk2_grenade", "display_name": "Mk 2 手榴弹", "item": "trenbankai:mk2_grenade", "cost": 90, "type": "gadget"},
+        {"id": "l83a1_grenade", "display_name": "L83A1 手榴弹", "item": "trenbankai:l83a1_grenade", "cost": 90, "type": "gadget"},
+        {"id": "landmine", "display_name": "地雷", "item": "trenbankai:landmine_item", "cost": 110, "type": "gadget"},
     ],
 }
 
@@ -141,10 +147,15 @@ def _normalize_teams(raw_teams: Any) -> Dict[str, Any]:
 
 def _normalize_mode(raw: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(raw.get("mode") or "tdm").strip().lower()
+    try:
+        match_minutes = max(1, int(raw.get("match_time_minutes") or 5))
+    except (TypeError, ValueError):
+        match_minutes = 5
     return {
         "mode": mode,
         "max_players_per_team": max(1, int(raw.get("max_players_per_team") or 8)),
         "target_score": max(1, int(raw.get("target_score") or 50)),
+        "match_time_minutes": match_minutes,
         "teams": _normalize_teams(raw.get("teams")),
     }
 
@@ -157,6 +168,7 @@ def migrate_legacy_map(raw: Dict[str, Any]) -> Dict[str, Any]:
         "mode": str(raw.get("mode") or "tdm").strip().lower(),
         "max_players_per_team": raw.get("max_players_per_team", 8),
         "target_score": raw.get("target_score", 50),
+        "match_time_minutes": raw.get("match_time_minutes", 5),
         "teams": raw.get("teams") or {},
     }
     return {
@@ -248,6 +260,47 @@ def mode_has_spawns(mode_cfg: Dict[str, Any]) -> bool:
     return True
 
 
+def mode_incomplete_reasons(map_cfg: Dict[str, Any], mode: str) -> List[str]:
+    """Return machine-readable reason codes for why a mode is not playable."""
+    reasons: List[str] = []
+    mode_key = str(mode or "").strip().lower()
+    if mode_key not in IMPLEMENTED_MODES:
+        reasons.append("reason_unimplemented")
+        return reasons
+    if not has_region(map_cfg):
+        reasons.append("reason_missing_region")
+    mode_cfg = get_mode_config(map_cfg, mode_key)
+    if mode_cfg is None:
+        reasons.append("reason_mode_not_found")
+        return reasons
+    teams = mode_cfg.get("teams") or {}
+    for team_id, code in (("a", "reason_missing_spawn_a"), ("b", "reason_missing_spawn_b")):
+        team = teams.get(team_id) or {}
+        spawns = team.get("spawns") or []
+        if not spawns:
+            reasons.append(code)
+    return reasons
+
+
+def map_incomplete_reasons(map_cfg: Dict[str, Any]) -> List[str]:
+    """Return reason codes when the map has no playable mode."""
+    if playable_modes(map_cfg):
+        return []
+    reasons: List[str] = []
+    if not has_region(map_cfg):
+        reasons.append("reason_missing_region")
+    modes = map_cfg.get("modes") or []
+    if not modes:
+        reasons.append("reason_no_modes")
+        return reasons
+    for mode_cfg in modes:
+        mode = str(mode_cfg.get("mode") or "").lower()
+        for code in mode_incomplete_reasons(map_cfg, mode):
+            if code not in reasons:
+                reasons.append(code)
+    return reasons
+
+
 def mode_playable(map_cfg: Dict[str, Any], mode: str) -> bool:
     mode_key = str(mode or "").strip().lower()
     if mode_key not in IMPLEMENTED_MODES:
@@ -269,6 +322,14 @@ def playable_modes(map_cfg: Dict[str, Any]) -> List[str]:
     return out
 
 
+def match_kd_score(kills: int, deaths: int) -> int:
+    """Positive K-D used for post-match ARC Core rewards."""
+    try:
+        return max(0, int(kills) - int(deaths))
+    except (TypeError, ValueError):
+        return 0
+
+
 def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
     mode_key = str(mode or "").strip().lower()
     mode_cfg = get_mode_config(map_cfg, mode_key)
@@ -282,6 +343,7 @@ def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[s
         "mode": mode_key,
         "max_players_per_team": int(mode_cfg.get("max_players_per_team") or 8),
         "target_score": int(mode_cfg.get("target_score") or 50),
+        "match_time_minutes": max(1, int(mode_cfg.get("match_time_minutes") or 5)),
         "teams": mode_cfg.get("teams") or {},
     }
 
@@ -302,6 +364,15 @@ def validate_weapon(raw: Dict[str, Any]) -> List[str]:
         extras = {}
     if not isinstance(extras, dict):
         errors.append("extras must be an object of item_id -> count")
+    ammo_sb = raw.get("ammo_scoreboard")
+    if ammo_sb is not None and not str(ammo_sb).strip():
+        errors.append("ammo_scoreboard cannot be empty when provided")
+    if raw.get("default_ammo") is not None:
+        try:
+            if int(raw.get("default_ammo")) < 0:
+                errors.append("default_ammo must be >= 0")
+        except (TypeError, ValueError):
+            errors.append("default_ammo must be an integer")
     return errors
 
 
@@ -316,7 +387,14 @@ def normalize_weapon(raw: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             if qty > 0 and str(item_id).strip():
                 extras[str(item_id).strip()] = qty
-    return {
+    ammo_scoreboard = str(raw.get("ammo_scoreboard") or "").strip()
+    default_ammo_raw = raw.get("default_ammo")
+    default_ammo: Optional[int] = None
+    if default_ammo_raw is not None and str(default_ammo_raw).strip() != "":
+        default_ammo = max(0, int(default_ammo_raw))
+        if not ammo_scoreboard:
+            ammo_scoreboard = str(raw.get("id") or "").strip()
+    out: Dict[str, Any] = {
         "id": str(raw.get("id")).strip(),
         "display_name": str(raw.get("display_name") or raw.get("id")),
         "item": str(raw.get("item")).strip(),
@@ -326,6 +404,10 @@ def normalize_weapon(raw: Dict[str, Any]) -> Dict[str, Any]:
         "amount": max(1, int(raw.get("amount") or 1)),
         "extras": extras,
     }
+    if ammo_scoreboard and default_ammo is not None:
+        out["ammo_scoreboard"] = ammo_scoreboard
+        out["default_ammo"] = default_ammo
+    return out
 
 
 class SettingManager:
@@ -506,6 +588,16 @@ class ConfigStore:
 
     def buy_time(self) -> int:
         return max(0, self.settings.GetSettingInt("BUY_TIME_SECONDS", 10))
+
+    def match_time(self) -> int:
+        """全局默认比赛秒数（仅作兜底；实际以各地图模式的 match_time_minutes 为准）。"""
+        return max(60, self.settings.GetSettingInt("MATCH_TIME_SECONDS", 300))
+
+    def win_guild_contribution_per_kd(self) -> int:
+        return max(0, self.settings.GetSettingInt("WIN_GUILD_CONTRIBUTION_PER_KD", 10))
+
+    def match_money_per_kd(self) -> int:
+        return max(0, self.settings.GetSettingInt("MATCH_MONEY_PER_KD", 100))
 
     def weapons_of_type(self, weapon_type: str) -> List[Dict[str, Any]]:
         return [w for w in self.weapons.values() if w["type"] == weapon_type]
