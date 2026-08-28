@@ -24,6 +24,7 @@ from endstone_arc_shooter_game.config import (
 from endstone_arc_shooter_game.map_db import MapDatabase
 from endstone_arc_shooter_game.session import (
     STATE_BUYING,
+    STATE_COUNTDOWN,
     STATE_LOBBY,
     STATE_PLAYING,
     TEAM_A,
@@ -303,6 +304,26 @@ class LobbyTests(unittest.TestCase):
         lobby.join("alice", 800, now=0)
         self.assertFalse(lobby.lobby_timed_out(900, now=899))
         self.assertTrue(lobby.lobby_timed_out(900, now=900))
+
+    def test_start_countdown_state(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.begin_countdown(5, now=10)
+        self.assertEqual(lobby.state, STATE_COUNTDOWN)
+        self.assertAlmostEqual(lobby.countdown_remaining(now=12), 3.0)
+        self.assertTrue(lobby.mark_announced("cd:3"))
+        self.assertFalse(lobby.mark_announced("cd:3"))
+        lobby.cancel_countdown()
+        self.assertEqual(lobby.state, STATE_LOBBY)
+        self.assertEqual(lobby.countdown_remaining(now=20), 0.0)
+
+    def test_teams_ready_to_start(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        self.assertFalse(lobby.teams_ready_to_start())
+        lobby.join("bob", 800, now=2)
+        self.assertTrue(lobby.teams_ready_to_start())
 
     def test_admin_leave_transfers(self):
         lobby = Lobby(admin="alice")

@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
     "BUY_TIME_SECONDS": "10",
+    "START_COUNTDOWN_SECONDS": "5",
     "MATCH_TIME_SECONDS": "300",
     "WIN_GUILD_CONTRIBUTION_PER_KD": "10",
     "MATCH_MONEY_PER_KD": "100",
@@ -588,6 +589,10 @@ class ConfigStore:
 
     def buy_time(self) -> int:
         return max(0, self.settings.GetSettingInt("BUY_TIME_SECONDS", 10))
+
+    def start_countdown(self) -> int:
+        """开赛前传送倒计时秒数（title 倒数）。"""
+        return max(1, self.settings.GetSettingInt("START_COUNTDOWN_SECONDS", 5))
 
     def match_time(self) -> int:
         """全局默认比赛秒数（仅作兜底；实际以各地图模式的 match_time_minutes 为准）。"""

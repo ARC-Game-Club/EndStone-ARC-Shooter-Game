@@ -7,11 +7,12 @@ import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from endstone_arc_shooter_game.config import IMPLEMENTED_MODES, build_runtime_map_cfg, mode_playable
 
 STATE_LOBBY = "lobby"
+STATE_COUNTDOWN = "countdown"
 STATE_BUYING = "buying"
 STATE_PLAYING = "playing"
 
@@ -110,12 +111,15 @@ class Lobby:
     map_cfg: Optional[Dict[str, Any]] = None
     state: str = STATE_LOBBY
     lobby_started_at: float = 0.0
+    countdown_ends_at: float = 0.0
     buy_ends_at: float = 0.0
     match_ends_at: float = 0.0
     players: Dict[str, PlayerState] = field(default_factory=dict)
     score_a: int = 0
     score_b: int = 0
     history: List[PlayerState] = field(default_factory=list)
+    # 已提示过的秒数标记，避免 tick 重复广播（如 "60"、"10"…"1"）
+    announced_secs: Set[str] = field(default_factory=set)
 
     @property
     def display_name(self) -> str:
@@ -276,23 +280,40 @@ class Lobby:
             return False, "need_spawns"
         return True, "ok"
 
+    def begin_countdown(self, countdown_seconds: int, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        self.state = STATE_COUNTDOWN
+        self.countdown_ends_at = now + max(1, int(countdown_seconds))
+        self.announced_secs = set()
+
     def begin_buy(self, buy_seconds: int, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         self.state = STATE_BUYING
         self.buy_ends_at = now + max(0, int(buy_seconds))
         self.score_a = 0
         self.score_b = 0
+        self.announced_secs = set()
 
     def begin_playing(self, match_seconds: int = 300, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         self.state = STATE_PLAYING
         self.match_ends_at = now + max(1, int(match_seconds))
+        self.announced_secs = set()
+
+    def cancel_countdown(self) -> None:
+        self.state = STATE_LOBBY
+        self.countdown_ends_at = 0.0
+        self.announced_secs = set()
 
     def lobby_timed_out(self, timeout_seconds: int, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
         if self.state != STATE_LOBBY:
             return False
         return now - self.lobby_started_at >= timeout_seconds
+
+    def countdown_remaining(self, now: Optional[float] = None) -> float:
+        now = time.time() if now is None else now
+        return max(0.0, self.countdown_ends_at - now)
 
     def buy_remaining(self, now: Optional[float] = None) -> float:
         now = time.time() if now is None else now
@@ -307,6 +328,20 @@ class Lobby:
         if self.state != STATE_PLAYING:
             return False
         return self.match_ends_at > 0 and now >= self.match_ends_at
+
+    def mark_announced(self, key: str) -> bool:
+        """首次标记成功返回 True，已提示过则 False。"""
+        if key in self.announced_secs:
+            return False
+        self.announced_secs.add(key)
+        return True
+
+    def teams_ready_to_start(self) -> bool:
+        return (
+            self.player_count() >= 2
+            and self.team_count(TEAM_A) > 0
+            and self.team_count(TEAM_B) > 0
+        )
 
     def winner_by_score(self) -> Optional[str]:
         if self.score_a > self.score_b:

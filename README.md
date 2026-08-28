@@ -1,6 +1,6 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.2.6-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.2.7-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
@@ -12,7 +12,7 @@ pip install build
 python -m build
 ```
 
-把 `dist/endstone_arc_shooter_game-0.2.6-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
+把 `dist/endstone_arc_shooter_game-0.2.7-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
 
 ```
 plugins/ARCShooterGame/
@@ -27,9 +27,10 @@ plugins/ARCShooterGame/
 | 指令 | 说明 |
 |---|---|
 | `/gs` | 主菜单：大厅列表 / 配置地图（OP） |
-| `/gs buy` | 比赛开始后打开商店 |
 | `/gs leave` | 离开大厅或比赛 |
 | `/gs reload` | OP：重载地图、武器、设置 |
+
+比赛中用快捷栏 **弧光币（第 9 格）右键** 打开武器商店。
 
 ## 流程
 
@@ -38,11 +39,12 @@ plugins/ARCShooterGame/
    - 若地图只有一种可玩模式（目前通常为团队死斗），选图后会自动选中该模式。
    - 若地图有多种可玩模式，选图后需再选模式。
 3. 从首位玩家加入起计时，默认 **15 分钟**未开局则解散大厅。
-4. 开局后：备份背包与位置 → `/clear` 清空背包 → `/gamemode 0` 生存模式 → 按队伍随机传送到出生点。
-5. 默认 **10 秒**购买时间，期间（以及整场比赛）可用 `/gs buy` 花战争点数买武器。
-6. 击杀敌对玩家：队伍 +1 分，杀手获得战争点数；误杀队友：队伍 -1 分（不低于 0）。
-7. 先达到目标分数的队伍获胜。结算后 `/clear` 清空比赛背包，并传送回开局前位置、恢复原先游戏模式。
-8. 比赛进行中若未满员，其他玩家仍可从大厅列表加入。
+4. 房主点击开始后先进入 **传送倒计时**（默认 5 秒，`title` 显示 5→1），结束后再备份背包、清空、切生存并传送到出生点。
+5. 进入 **购买阶段**（默认 10 秒）时弹出 `title`；期间与整场比赛均可右键弧光币花战争点数买武器；屏幕 tip 显示剩余购买时间与比分。
+6. 购买结束进入 **战斗阶段**，再弹一次 `title`（限时与目标分）；击杀敌对玩家队伍 +1 分并奖励战争点数，误杀队友 -1 分（不低于 0）。
+7. 临近结束时聊天广播提醒（剩余 1 分钟）；最后 10 秒同时广播 + `title` 倒数。
+8. 先达到目标分数或时间到比分高者获胜。结算用 **toast** 推送胜/负/平局，并弹出详细战绩表单；随后清空比赛背包并传送回开局前位置。
+9. 比赛进行中若未满员，其他玩家仍可从大厅列表加入。
 
 离开地图区域会被传送回复活点。死亡不掉落，并在己方出生点重生。
 
@@ -69,10 +71,18 @@ STARTING_POINTS=1000
 KILL_REWARD_POINTS=50
 LOBBY_TIMEOUT_SECONDS=900
 BUY_TIME_SECONDS=10
+START_COUNTDOWN_SECONDS=5
+MATCH_TIME_SECONDS=300
 DEFAULT_LANGUAGE_CODE=ZH-CN
 WIN_GUILD_CONTRIBUTION_PER_KD=10
 MATCH_MONEY_PER_KD=100
 ```
+
+| 键 | 说明 |
+|---|---|
+| `BUY_TIME_SECONDS` | 开局购买阶段时长（秒） |
+| `START_COUNTDOWN_SECONDS` | 开赛前传送倒计时（秒，`title` 倒数） |
+| `MATCH_TIME_SECONDS` | 全局默认比赛秒数（兜底；实际以各地图模式的「比赛时长（分钟）」为准） |
 
 赛后奖励（需安装 ARCCore）：所有玩家按 `max(0, K-D)` 获得金钱；胜队成员额外获得公会贡献点。倍率见上两项配置。
 
@@ -114,6 +124,13 @@ python -m unittest tests.test_logic
 ```
 
 ## 更新日志
+
+### v0.2.7
+
+- **开赛传送倒计时**：开始游戏后先 `title` 倒数再传送；人数不足自动取消；`START_COUNTDOWN_SECONDS` 可配（默认 5）
+- **阶段 title**：进入购买阶段、战斗开始时分别弹出 title 提示
+- **临近结束提醒**：剩余 1 分钟聊天广播；最后 10 秒广播 + title 倒数
+- **结算 toast**：胜/负/平局用 `send_toast` 推送；详细战绩仍用 ActionForm
 
 ### v0.2.6
 

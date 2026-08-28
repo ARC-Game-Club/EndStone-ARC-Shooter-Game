@@ -52,6 +52,7 @@ from endstone_arc_shooter_game.inventory import (
 from endstone_arc_shooter_game.language import LanguageManager
 from endstone_arc_shooter_game.session import (
     STATE_BUYING,
+    STATE_COUNTDOWN,
     STATE_LOBBY,
     STATE_PLAYING,
     TEAM_A,
@@ -230,6 +231,9 @@ class ARCShooterGamePlugin(Plugin):
             else:
                 for ps in list(lobby.online_players()):
                     self.player_to_lobby.pop(ps.name, None)
+                    member = self._get_player(ps.name)
+                    if member:
+                        self._restore_name_tag(member)
                 self.lobbies.pop(lobby.lobby_id, None)
         self._safe_log("info", "[ARCShooterGame] disabled")
 
@@ -315,7 +319,7 @@ class ARCShooterGamePlugin(Plugin):
         player = event.player
         lobby = self._lobby_of(player.name)
         if lobby is not None:
-            if lobby.state == STATE_LOBBY:
+            if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
                 self._leave_lobby(player, lobby)
             elif lobby.state in (STATE_BUYING, STATE_PLAYING):
                 self._leave_match(player, lobby)
@@ -461,17 +465,16 @@ class ARCShooterGamePlugin(Plugin):
                 if lobby.state == STATE_LOBBY and lobby.lobby_timed_out(timeout, now):
                     self._dissolve_lobby(lobby, timeout=True)
                     continue
-                if lobby.state == STATE_BUYING and lobby.buy_remaining(now) <= 0:
-                    match_seconds = lobby.match_time_seconds
-                    lobby.begin_playing(match_seconds, now)
-                    match_min = lobby.match_time_minutes
-                    self._broadcast(
-                        lobby,
-                        self._t("GAME_STARTED").format(match_min, lobby.target_score),
-                    )
-                if lobby.state == STATE_PLAYING and lobby.match_timed_out(now):
-                    self._end_match(lobby, lobby.winner_by_score(), timed_out=True)
+                if lobby.state == STATE_COUNTDOWN:
+                    self._tick_start_countdown(lobby, now)
                     continue
+                if lobby.state == STATE_BUYING and lobby.buy_remaining(now) <= 0:
+                    self._enter_playing(lobby, now)
+                if lobby.state == STATE_PLAYING:
+                    self._tick_match_end_warnings(lobby, now)
+                    if lobby.match_timed_out(now):
+                        self._end_match(lobby, lobby.winner_by_score(), timed_out=True)
+                        continue
                 if lobby.state in (STATE_BUYING, STATE_PLAYING):
                     self._send_score_tips(lobby, now)
                     self._enforce_region(lobby)
@@ -572,9 +575,20 @@ class ARCShooterGamePlugin(Plugin):
         self._notify_lobby_members_joined(lobby, player.name, count, max_players)
         self._apply_team_name_tag(player, lobby)
         self._refresh_lobby_menus(lobby)
+        if lobby.state == STATE_COUNTDOWN:
+            remain = int(math.ceil(lobby.countdown_remaining()))
+            self._send_title(
+                player,
+                self._t("TITLE_COUNTDOWN").format(remain),
+                self._t("TITLE_COUNTDOWN_SUB"),
+                fade_in=0,
+                stay=25,
+                fade_out=5,
+            )
 
     def _leave_lobby(self, player: Player, lobby: Lobby) -> None:
         leaver_name = player.name
+        was_countdown = lobby.state == STATE_COUNTDOWN
         new_admin = lobby.leave(leaver_name)
         self.player_to_lobby.pop(leaver_name, None)
         self._restore_name_tag(player)
@@ -583,6 +597,9 @@ class ARCShooterGamePlugin(Plugin):
         if lobby.player_count() == 0:
             self.lobbies.pop(lobby.lobby_id, None)
             return
+        if was_countdown and not lobby.teams_ready_to_start():
+            lobby.cancel_countdown()
+            self._broadcast(lobby, self._t("COUNTDOWN_CANCELLED"))
         if new_admin:
             admin_player = self._get_player(new_admin)
             if admin_player:
@@ -594,7 +611,7 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None:
             player.send_message(self._t("LEAVE_NOT_IN"))
             return
-        if lobby.state == STATE_LOBBY:
+        if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
             self._leave_lobby(player, lobby)
             return
         if lobby.state in (STATE_BUYING, STATE_PLAYING):
@@ -644,7 +661,7 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(self._t("START_NEED_PLAYERS"))
             return
         buy_seconds = self.config_store.buy_time() if self.config_store else 10
-        match_seconds = lobby.match_time_seconds
+        countdown = self.config_store.start_countdown() if self.config_store else 5
         starting = self.config_store.starting_points() if self.config_store else 1000
         for ps in lobby.online_players():
             ps.points = starting
@@ -654,19 +671,95 @@ class ARCShooterGamePlugin(Plugin):
             ps.secondary_id = None
             ps.armor_id = None
             ps.gadgets = []
-        lobby.begin_buy(buy_seconds)
-        if buy_seconds <= 0:
-            lobby.begin_playing(match_seconds)
+        lobby.begin_countdown(countdown)
         self._broadcast(lobby, self._t("START_BROADCAST").format(buy_seconds))
+        self._apply_lobby_name_tags(lobby)
+        remain = int(math.ceil(lobby.countdown_remaining()))
+        self._title_lobby(
+            lobby,
+            self._t("TITLE_COUNTDOWN").format(remain),
+            self._t("TITLE_COUNTDOWN_SUB"),
+            fade_in=0,
+            stay=25,
+            fade_out=5,
+        )
+        lobby.mark_announced(f"cd:{remain}")
+
+    def _tick_start_countdown(self, lobby: Lobby, now: float) -> None:
+        if not lobby.teams_ready_to_start():
+            lobby.cancel_countdown()
+            self._broadcast(lobby, self._t("COUNTDOWN_CANCELLED"))
+            self._refresh_lobby_menus(lobby)
+            return
+        remain = lobby.countdown_remaining(now)
+        if remain <= 0:
+            self._finish_countdown_and_start(lobby, now)
+            return
+        sec = int(math.ceil(remain))
+        key = f"cd:{sec}"
+        if lobby.mark_announced(key):
+            self._title_lobby(
+                lobby,
+                self._t("TITLE_COUNTDOWN").format(sec),
+                self._t("TITLE_COUNTDOWN_SUB"),
+                fade_in=0,
+                stay=25,
+                fade_out=5,
+            )
+
+    def _finish_countdown_and_start(self, lobby: Lobby, now: float) -> None:
+        buy_seconds = self.config_store.buy_time() if self.config_store else 10
         for ps in lobby.online_players():
             member = self._get_player(ps.name)
             if member is None:
                 continue
             self._prepare_fighter(member, lobby)
         self._apply_lobby_name_tags(lobby)
-        if lobby.state == STATE_PLAYING:
-            match_min = lobby.match_time_minutes
-            self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
+        lobby.begin_buy(buy_seconds, now)
+        if buy_seconds <= 0:
+            self._enter_playing(lobby, now)
+            return
+        self._title_lobby(
+            lobby,
+            self._t("TITLE_BUY"),
+            self._t("TITLE_BUY_SUB").format(buy_seconds),
+            fade_in=5,
+            stay=40,
+            fade_out=10,
+        )
+
+    def _enter_playing(self, lobby: Lobby, now: float) -> None:
+        match_seconds = lobby.match_time_seconds
+        lobby.begin_playing(match_seconds, now)
+        match_min = lobby.match_time_minutes
+        self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
+        self._title_lobby(
+            lobby,
+            self._t("TITLE_BATTLE"),
+            self._t("TITLE_BATTLE_SUB").format(match_min, lobby.target_score),
+            fade_in=5,
+            stay=50,
+            fade_out=10,
+        )
+
+    def _tick_match_end_warnings(self, lobby: Lobby, now: float) -> None:
+        remain = lobby.match_remaining(now)
+        sec = int(math.ceil(remain))
+        if sec <= 0:
+            return
+        if sec == 60 and lobby.mark_announced("warn:60"):
+            self._broadcast(lobby, self._t("MATCH_WARN_ONE_MINUTE"))
+            return
+        if 1 <= sec <= 10 and lobby.mark_announced(f"warn:{sec}"):
+            self._broadcast(lobby, self._t("MATCH_WARN_SECONDS").format(sec))
+            self._title_lobby(
+                lobby,
+                self._t("TITLE_MATCH_END_COUNT").format(sec),
+                self._t("TITLE_MATCH_END_COUNT_SUB"),
+                fade_in=0,
+                stay=20,
+                fade_out=5,
+            )
 
     def _prepare_fighter(self, player: Player, lobby: Lobby) -> None:
         snap = snapshot_player(player, dimension_id_of(player.location))
@@ -830,6 +923,56 @@ class ARCShooterGamePlugin(Plugin):
             except Exception:
                 pass
 
+    def _send_title(
+        self,
+        player: Player,
+        title: str,
+        subtitle: str = "",
+        *,
+        fade_in: int = 10,
+        stay: int = 70,
+        fade_out: int = 20,
+    ) -> None:
+        if not hasattr(player, "send_title"):
+            if title or subtitle:
+                player.send_message(" ".join(x for x in (title, subtitle) if x))
+            return
+        try:
+            player.send_title(str(title or ""), str(subtitle or ""), fade_in, stay, fade_out)
+        except Exception:
+            try:
+                player.send_title(str(title or ""), str(subtitle or ""))
+            except Exception:
+                if title or subtitle:
+                    player.send_message(" ".join(x for x in (title, subtitle) if x))
+
+    def _send_toast(self, player: Player, title: str, content: str = "") -> None:
+        title_s = str(title or "").strip() or self._t("MATCH_RESULT_TOAST_TITLE")
+        content_s = str(content or "")
+        if hasattr(player, "send_toast"):
+            try:
+                player.send_toast(title_s, content_s)
+                return
+            except Exception:
+                pass
+        player.send_message(f"[{title_s}] {content_s}".rstrip())
+
+    def _title_lobby(
+        self,
+        lobby: Lobby,
+        title: str,
+        subtitle: str = "",
+        *,
+        fade_in: int = 10,
+        stay: int = 70,
+        fade_out: int = 20,
+    ) -> None:
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            self._send_title(member, title, subtitle, fade_in=fade_in, stay=stay, fade_out=fade_out)
+
     def _tp_to_team_spawn(self, player: Player, lobby: Lobby) -> None:
         ps = lobby.players.get(player.name)
         if ps is None:
@@ -854,6 +997,10 @@ class ARCShooterGamePlugin(Plugin):
         still = [ps.name for ps in lobby.online_players()]
         participants = {ps.name for ps in lobby.result_rows()}
         target_names = set(still) | participants
+        team_by_name = {ps.name: ps.team for ps in lobby.result_rows()}
+        a_name = lobby.team_name(TEAM_A)
+        b_name = lobby.team_name(TEAM_B)
+        score_a, score_b = lobby.score_a, lobby.score_b
         for name in still:
             self.player_to_lobby.pop(name, None)
             member = self._get_player(name)
@@ -864,8 +1011,36 @@ class ARCShooterGamePlugin(Plugin):
             member = self._get_player(name)
             if member is None:
                 continue
+            self._send_match_result_toast(
+                member,
+                team_by_name.get(name),
+                winner,
+                a_name,
+                score_a,
+                score_b,
+                b_name,
+            )
             self._schedule_match_result_form(member, result_content)
         self.lobbies.pop(lobby.lobby_id, None)
+
+    def _send_match_result_toast(
+        self,
+        player: Player,
+        team: Optional[str],
+        winner: Optional[str],
+        a_name: str,
+        score_a: int,
+        score_b: int,
+        b_name: str,
+    ) -> None:
+        title = self._t("MATCH_RESULT_TOAST_TITLE")
+        if winner is None or team is None:
+            content = self._t("MATCH_RESULT_TOAST_DRAW").format(a_name, score_a, b_name, score_b)
+        elif team == winner:
+            content = self._t("MATCH_RESULT_TOAST_WIN").format(a_name, score_a, b_name, score_b)
+        else:
+            content = self._t("MATCH_RESULT_TOAST_LOSE").format(a_name, score_a, b_name, score_b)
+        self._send_toast(player, title, content)
 
     def _get_arc_core(self):
         try:
@@ -1133,6 +1308,8 @@ class ARCShooterGamePlugin(Plugin):
     def _lobby_status_label(self, lobby: Lobby) -> str:
         if lobby.state == STATE_LOBBY:
             return self._t("LOBBY_STATUS_WAITING")
+        if lobby.state == STATE_COUNTDOWN:
+            return self._t("LOBBY_STATUS_COUNTDOWN")
         if lobby.state == STATE_BUYING:
             return self._t("LOBBY_STATUS_BUYING")
         return self._t("LOBBY_STATUS_PLAYING")
@@ -1332,7 +1509,7 @@ class ARCShooterGamePlugin(Plugin):
     def _show_root_menu(self, player: Player) -> None:
         lobby = self._lobby_of(player.name)
         if lobby is not None:
-            if lobby.state == STATE_LOBBY:
+            if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
                 self._show_lobby_menu(player, lobby)
             else:
                 self._show_match_menu(player, lobby)
@@ -1396,7 +1573,7 @@ class ARCShooterGamePlugin(Plugin):
             )
             form = ActionForm(title=self._t("LOBBY_TITLE"), content=content)
             is_admin = lobby.admin == player.name
-            if is_admin:
+            if is_admin and lobby.state == STATE_LOBBY:
                 map_mode_btn = self._t("BTN_CHANGE_MAP_MODE") if lobby.map_cfg else self._t("BTN_SELECT_MAP_MODE")
                 form.add_button(
                     map_mode_btn,
