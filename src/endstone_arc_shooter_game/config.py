@@ -21,7 +21,7 @@ DEFAULT_SETTINGS = {
     "STARTING_POINTS": "1000",
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
-    "BUY_TIME_SECONDS": "10",
+    "BUY_TIME_SECONDS": "20",
     "START_COUNTDOWN_SECONDS": "5",
     "MATCH_TIME_SECONDS": "300",
     "WIN_GUILD_CONTRIBUTION_PER_KD": "10",
@@ -52,7 +52,7 @@ DEFAULT_WEAPONS = {
         {"id": "awp", "display_name": "AWP 狙击步枪", "item": "trenbankai:awp", "cost": 1450, "type": "primary", "extras": {"trenbankai:awp_mag": 6}, "ammo_scoreboard": "awp", "default_ammo": 10},
         {"id": "rpg7", "display_name": "RPG-7 火箭筒", "item": "trenbankai:rpg7", "cost": 1500, "type": "secondary", "extras": {"trenbankai:rpg7_rocket": 6}, "ammo_scoreboard": "rpg7", "default_ammo": 1},
         {"id": "glock17", "display_name": "格洛克 17", "item": "trenbankai:glock17", "cost": 300, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock17", "default_ammo": 17},
-        {"id": "iron_sword", "display_name": "铁剑", "item": "minecraft:iron_sword", "cost": 100, "type": "secondary"},
+        {"id": "netherite_sword", "display_name": "下界合金剑", "item": "minecraft:netherite_sword", "cost": 100, "type": "secondary"},
         {"id": "glock18", "display_name": "格洛克 18c", "item": "trenbankai:glock18", "cost": 550, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock18", "default_ammo": 17},
         {"id": "deagle", "display_name": "沙漠之鹰", "item": "trenbankai:deagle", "cost": 800, "type": "secondary", "extras": {"trenbankai:deagle_mag": 6}, "ammo_scoreboard": "deagle", "default_ammo": 10},
         {"id": "iron_armor", "display_name": "铁甲全套", "item": "minecraft:iron_helmet", "cost": 500, "type": "armor", "extras": {"minecraft:iron_helmet": 1, "minecraft:iron_chestplate": 1, "minecraft:iron_leggings": 1, "minecraft:iron_boots": 1}},
@@ -588,7 +588,7 @@ class ConfigStore:
         return max(30, self.settings.GetSettingInt("LOBBY_TIMEOUT_SECONDS", 900))
 
     def buy_time(self) -> int:
-        return max(0, self.settings.GetSettingInt("BUY_TIME_SECONDS", 10))
+        return max(0, self.settings.GetSettingInt("BUY_TIME_SECONDS", 20))
 
     def start_countdown(self) -> int:
         """开赛前传送倒计时秒数（title 倒数）。"""

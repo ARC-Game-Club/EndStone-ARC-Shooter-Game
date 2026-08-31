@@ -190,9 +190,9 @@
       "default_ammo": 17
     },
     {
-      "id": "iron_sword",
-      "display_name": "铁剑",
-      "item": "minecraft:iron_sword",
+      "id": "netherite_sword",
+      "display_name": "下界合金剑",
+      "item": "minecraft:netherite_sword",
       "cost": 100,
       "type": "secondary",
       "extras": {}

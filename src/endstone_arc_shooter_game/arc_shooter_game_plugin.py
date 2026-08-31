@@ -93,6 +93,9 @@ _VANILLA_CMD_DIM = {
 ARC_COIN_ITEM = "arc:arc_coin"
 ARC_COIN_HOTBAR_SLOT = 8
 SHOP_DEBOUNCE_SECONDS = 0.2
+SPAWN_PROTECT_SECONDS = 3
+MATCH_BUFF_DURATION_SECONDS = 1000000
+BUY_FREEZE_TOLERANCE = 0.35
 TEAM_NAME_COLOR = {
     TEAM_A: "§c",
     TEAM_B: "§9",
@@ -189,7 +192,10 @@ class ARCShooterGamePlugin(Plugin):
         self._shop_open_at: Dict[str, float] = {}
         self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
+        self._spawn_protect_until: Dict[str, float] = {}
+        self._buy_freeze: Dict[str, Dict[str, Any]] = {}
         self._tick_task = None
+        self._fast_tick_task = None
 
     def _safe_log(self, level: str, message: str) -> None:
         if hasattr(self, "logger") and self.logger is not None:
@@ -218,6 +224,12 @@ class ARCShooterGamePlugin(Plugin):
             self._tick_task = self.server.scheduler.run_task(self, self._on_tick, delay=20, period=20)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] Failed to register tick: {e}")
+        try:
+            self._fast_tick_task = self.server.scheduler.run_task(
+                self, self._on_fast_tick, delay=5, period=5
+            )
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] Failed to register fast tick: {e}")
         self._safe_log("info", "[ARCShooterGame] enabled")
 
     def on_disable(self) -> None:
@@ -334,6 +346,10 @@ class ARCShooterGamePlugin(Plugin):
             return
         lobby = self._lobby_of(victim_name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
+            return
+        if lobby.state == STATE_BUYING or self._is_spawn_protected(victim_name):
+            if hasattr(event, "is_cancelled"):
+                event.is_cancelled = True
             return
         killer_name = self._killer_name_from_source(getattr(event, "damage_source", None))
         if killer_name and killer_name != victim_name and self._lobby_of(killer_name) is lobby:
@@ -481,6 +497,16 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] tick error: {e}\n{traceback.format_exc()}")
 
+    def _on_fast_tick(self) -> None:
+        try:
+            for lobby in list(self.lobbies.values()):
+                if lobby.state == STATE_BUYING:
+                    self._enforce_buy_freeze(lobby)
+                if lobby.state in (STATE_BUYING, STATE_PLAYING, STATE_COUNTDOWN, STATE_LOBBY):
+                    self._update_sneak_name_tags(lobby)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] fast tick error: {e}\n{traceback.format_exc()}")
+
     def _enforce_region(self, lobby: Lobby) -> None:
         if lobby.map_cfg is None:
             return
@@ -567,6 +593,11 @@ class ARCShooterGamePlugin(Plugin):
             self._notify(player, self._t("JOIN_OK_MATCH"))
             self._prepare_fighter(player, lobby)
             self._apply_team_name_tag(player, lobby)
+            if lobby.state == STATE_BUYING:
+                self._set_buy_freeze(player)
+            elif lobby.state == STATE_PLAYING:
+                self._apply_match_buffs(player)
+                self._apply_spawn_protect(player)
             self._show_match_menu(player, lobby)
             return
         count = lobby.player_count()
@@ -623,6 +654,8 @@ class ARCShooterGamePlugin(Plugin):
     def _leave_match(self, player: Player, lobby: Lobby) -> None:
         lobby.leave(player.name)
         self.player_to_lobby.pop(player.name, None)
+        self._clear_buy_freeze(player.name)
+        self._clear_match_effects(player.name)
         self._restore_player(player, after_match=True)
         self._restore_name_tag(player)
         player.send_message(self._t("LEAVE_OK"))
@@ -660,7 +693,7 @@ class ARCShooterGamePlugin(Plugin):
             else:
                 player.send_message(self._t("START_NEED_PLAYERS"))
             return
-        buy_seconds = self.config_store.buy_time() if self.config_store else 10
+        buy_seconds = self.config_store.buy_time() if self.config_store else 20
         countdown = self.config_store.start_countdown() if self.config_store else 5
         starting = self.config_store.starting_points() if self.config_store else 1000
         for ps in lobby.online_players():
@@ -708,12 +741,13 @@ class ARCShooterGamePlugin(Plugin):
             )
 
     def _finish_countdown_and_start(self, lobby: Lobby, now: float) -> None:
-        buy_seconds = self.config_store.buy_time() if self.config_store else 10
+        buy_seconds = self.config_store.buy_time() if self.config_store else 20
         for ps in lobby.online_players():
             member = self._get_player(ps.name)
             if member is None:
                 continue
             self._prepare_fighter(member, lobby)
+            self._set_buy_freeze(member)
         self._apply_lobby_name_tags(lobby)
         lobby.begin_buy(buy_seconds, now)
         if buy_seconds <= 0:
@@ -731,6 +765,12 @@ class ARCShooterGamePlugin(Plugin):
     def _enter_playing(self, lobby: Lobby, now: float) -> None:
         match_seconds = lobby.match_time_seconds
         lobby.begin_playing(match_seconds, now)
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            self._clear_buy_freeze(ps.name)
+            self._apply_match_buffs(member)
         match_min = lobby.match_time_minutes
         self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
         self._title_lobby(
@@ -798,6 +838,11 @@ class ARCShooterGamePlugin(Plugin):
                 player.health = getattr(player, "max_health", 20) or 20
         except Exception:
             pass
+        if lobby.state == STATE_PLAYING:
+            self._apply_match_buffs(player)
+            self._apply_spawn_protect(player)
+        elif lobby.state == STATE_BUYING:
+            self._set_buy_freeze(player)
 
     def _give_arc_coin(self, player: Player) -> None:
         remove_item_count(player, ARC_COIN_ITEM, 64)
@@ -1005,6 +1050,8 @@ class ARCShooterGamePlugin(Plugin):
             self.player_to_lobby.pop(name, None)
             member = self._get_player(name)
             if member:
+                self._clear_buy_freeze(name)
+                self._clear_match_effects(name)
                 self._restore_player(member, after_match=True)
                 self._restore_name_tag(member)
         for name in target_names:
@@ -1034,12 +1081,14 @@ class ARCShooterGamePlugin(Plugin):
         b_name: str,
     ) -> None:
         title = self._t("MATCH_RESULT_TOAST_TITLE")
+        a_disp = self._colored_label(a_name, TEAM_A)
+        b_disp = self._colored_label(b_name, TEAM_B)
         if winner is None or team is None:
-            content = self._t("MATCH_RESULT_TOAST_DRAW").format(a_name, score_a, b_name, score_b)
+            content = self._t("MATCH_RESULT_TOAST_DRAW").format(a_disp, score_a, b_disp, score_b)
         elif team == winner:
-            content = self._t("MATCH_RESULT_TOAST_WIN").format(a_name, score_a, b_name, score_b)
+            content = self._t("MATCH_RESULT_TOAST_WIN").format(a_disp, score_a, b_disp, score_b)
         else:
-            content = self._t("MATCH_RESULT_TOAST_LOSE").format(a_name, score_a, b_name, score_b)
+            content = self._t("MATCH_RESULT_TOAST_LOSE").format(a_disp, score_a, b_disp, score_b)
         self._send_toast(player, title, content)
 
     def _get_arc_core(self):
@@ -1105,45 +1154,57 @@ class ARCShooterGamePlugin(Plugin):
         timed_out: bool = False,
         rewards: Optional[Dict[str, Dict[str, int]]] = None,
     ) -> str:
-        a_name = lobby.team_name(TEAM_A)
-        b_name = lobby.team_name(TEAM_B)
+        a_name = self._colored_team_name(lobby, TEAM_A)
+        b_name = self._colored_team_name(lobby, TEAM_B)
         parts: List[str] = []
         if timed_out:
             parts.append(self._t("MATCH_END_TIME_NOTE"))
         parts.append(self._t("MATCH_END_SCORE").format(a_name, lobby.score_a, b_name, lobby.score_b))
         if winner:
-            parts.append(self._t("MATCH_END_WINNER").format(lobby.team_name(winner)))
+            parts.append(self._t("MATCH_END_WINNER").format(self._colored_team_name(lobby, winner)))
         else:
             parts.append(self._t("MATCH_END_DRAW"))
         parts.append("")
         rows = lobby.result_rows()
         for team_id in (TEAM_A, TEAM_B):
-            parts.append(self._t("MATCH_END_STATS_TEAM").format(lobby.team_name(team_id)))
-            members = [p for p in rows if p.team == team_id]
+            parts.append(
+                self._t("MATCH_END_STATS_TEAM").format(self._colored_team_name(lobby, team_id))
+            )
+            members = sorted(
+                [p for p in rows if p.team == team_id],
+                key=lambda p: (-int(p.kills), int(p.deaths), p.name),
+            )
             if not members:
                 parts.append(self._t("NO_PLAYER"))
             for ps in members:
-                parts.append(self._t("MATCH_END_STATS_PLAYER").format(ps.name, ps.kills, ps.deaths))
+                parts.append(
+                    self._t("MATCH_END_STATS_PLAYER").format(
+                        self._colored_label(ps.name, ps.team),
+                        ps.kills,
+                        ps.deaths,
+                    )
+                )
         reward_map = rewards or {}
         parts.append("")
         parts.append(self._t("MATCH_END_REWARDS_HEADER"))
         for ps in rows:
+            colored = self._colored_label(ps.name, ps.team)
             entry = reward_map.get(ps.name)
             if entry:
                 money = int(entry.get("money", 0))
                 contribution = int(entry.get("contribution", 0))
                 if money > 0 and contribution > 0:
                     parts.append(
-                        self._t("MATCH_END_REWARD_BOTH").format(ps.name, money, contribution)
+                        self._t("MATCH_END_REWARD_BOTH").format(colored, money, contribution)
                     )
                 elif money > 0:
-                    parts.append(self._t("MATCH_END_REWARD_MONEY").format(ps.name, money))
+                    parts.append(self._t("MATCH_END_REWARD_MONEY").format(colored, money))
                 elif contribution > 0:
-                    parts.append(self._t("MATCH_END_REWARD_CONTRIB").format(ps.name, contribution))
+                    parts.append(self._t("MATCH_END_REWARD_CONTRIB").format(colored, contribution))
                 else:
-                    parts.append(self._t("MATCH_END_REWARD_NONE").format(ps.name))
+                    parts.append(self._t("MATCH_END_REWARD_NONE").format(colored))
             else:
-                parts.append(self._t("MATCH_END_REWARD_NONE").format(ps.name))
+                parts.append(self._t("MATCH_END_REWARD_NONE").format(colored))
         return "\n".join(parts)
 
     def _show_match_result_form(self, player: Player, content: str) -> None:
@@ -1242,6 +1303,147 @@ class ARCShooterGamePlugin(Plugin):
             self.server.command_sender,
             f"gamemode {cmd_mode} {format_player_name(player_name)}",
         )
+
+    def _dispatch_effect(
+        self,
+        player_name: str,
+        effect: str,
+        seconds: int,
+        amplifier: int = 0,
+        *,
+        hide_particles: bool = True,
+    ) -> None:
+        hide = "true" if hide_particles else "false"
+        self.server.dispatch_command(
+            self.server.command_sender,
+            (
+                f"effect {format_player_name(player_name)} {effect} "
+                f"{max(0, int(seconds))} {max(0, int(amplifier))} {hide}"
+            ),
+        )
+
+    def _clear_effects(self, player_name: str) -> None:
+        self.server.dispatch_command(
+            self.server.command_sender,
+            f"effect {format_player_name(player_name)} clear",
+        )
+
+    def _set_movement_permission(self, player_name: str, enabled: bool) -> None:
+        state = "enabled" if enabled else "disabled"
+        try:
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f"inputpermission set {format_player_name(player_name)} movement {state}",
+            )
+        except Exception as e:
+            self._safe_log(
+                "warning",
+                f"[ARCShooterGame] inputpermission movement for {player_name}: {e}",
+            )
+
+    def _is_spawn_protected(self, player_name: str) -> bool:
+        until = self._spawn_protect_until.get(player_name)
+        if until is None:
+            return False
+        if time.time() >= until:
+            self._spawn_protect_until.pop(player_name, None)
+            return False
+        return True
+
+    def _apply_spawn_protect(self, player: Player) -> None:
+        self._spawn_protect_until[player.name] = time.time() + SPAWN_PROTECT_SECONDS
+        # 隐身 + 抗性提升 V（中文常称保护 V）
+        self._dispatch_effect(player.name, "invisibility", SPAWN_PROTECT_SECONDS, 0)
+        self._dispatch_effect(player.name, "resistance", SPAWN_PROTECT_SECONDS, 4)
+
+    def _apply_match_buffs(self, player: Player) -> None:
+        self._dispatch_effect(player.name, "speed", MATCH_BUFF_DURATION_SECONDS, 0)
+        self._dispatch_effect(player.name, "jump_boost", MATCH_BUFF_DURATION_SECONDS, 0)
+
+    def _clear_match_effects(self, player_name: str) -> None:
+        self._spawn_protect_until.pop(player_name, None)
+        self._clear_effects(player_name)
+
+    def _set_buy_freeze(self, player: Player) -> None:
+        loc = getattr(player, "location", None)
+        if loc is None:
+            return
+        self._buy_freeze[player.name] = {
+            "x": float(loc.x),
+            "y": float(loc.y),
+            "z": float(loc.z),
+            "dimension": dimension_id_of(loc),
+            "yaw": getattr(loc, "yaw", None),
+            "pitch": getattr(loc, "pitch", None),
+        }
+        self._set_movement_permission(player.name, False)
+
+    def _clear_buy_freeze(self, player_name: str) -> None:
+        if player_name in self._buy_freeze:
+            self._buy_freeze.pop(player_name, None)
+            self._set_movement_permission(player_name, True)
+
+    def _enforce_buy_freeze(self, lobby: Lobby) -> None:
+        for ps in lobby.online_players():
+            anchor = self._buy_freeze.get(ps.name)
+            player = self._get_player(ps.name)
+            if player is None:
+                continue
+            if anchor is None:
+                self._set_buy_freeze(player)
+                continue
+            loc = getattr(player, "location", None)
+            if loc is None:
+                continue
+            dx = float(loc.x) - float(anchor["x"])
+            dy = float(loc.y) - float(anchor["y"])
+            dz = float(loc.z) - float(anchor["z"])
+            if (dx * dx + dy * dy + dz * dz) > (BUY_FREEZE_TOLERANCE * BUY_FREEZE_TOLERANCE):
+                self._tp_player(
+                    player.name,
+                    float(anchor["x"]),
+                    float(anchor["y"]),
+                    float(anchor["z"]),
+                    str(anchor.get("dimension") or "overworld"),
+                    anchor.get("yaw"),
+                    anchor.get("pitch"),
+                )
+
+    def _player_is_sneaking(self, player: Player) -> bool:
+        for attr in ("is_sneaking", "sneaking", "is_crouching"):
+            val = getattr(player, attr, None)
+            if isinstance(val, bool):
+                return val
+            if callable(val):
+                try:
+                    return bool(val())
+                except Exception:
+                    continue
+        return False
+
+    def _update_sneak_name_tags(self, lobby: Lobby) -> None:
+        for ps in lobby.online_players():
+            player = self._get_player(ps.name)
+            if player is None:
+                continue
+            if self._player_is_sneaking(player):
+                try:
+                    if str(getattr(player, "name_tag", "") or "") != "":
+                        player.name_tag = ""
+                except Exception as e:
+                    self._safe_log(
+                        "warning",
+                        f"[ARCShooterGame] clear sneak name_tag for {player.name}: {e}",
+                    )
+            else:
+                self._apply_team_name_tag(player, lobby)
+
+    def _colored_label(self, text: str, team_id: Optional[str]) -> str:
+        color = TEAM_NAME_COLOR.get(team_id or "", "§f")
+        return f"{color}{text}"
+
+    def _colored_team_name(self, lobby: Lobby, team_id: str) -> str:
+        return self._colored_label(lobby.team_name(team_id), team_id)
 
     def _broadcast(self, lobby: Lobby, message: str) -> None:
         for ps in lobby.online_players():
