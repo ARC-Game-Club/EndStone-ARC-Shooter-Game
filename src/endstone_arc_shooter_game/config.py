@@ -17,7 +17,7 @@ DEFAULT_SETTINGS = {
     "DEFAULT_LANGUAGE_CODE": "ZH-CN",
     "PRIMARY_WEAPON_SLOTS": "1",
     "SECONDARY_WEAPON_SLOTS": "1",
-    "GADGET_SLOTS": "3",
+    "GADGET_SLOTS": "2",
     "STARTING_POINTS": "1000",
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
@@ -25,6 +25,13 @@ DEFAULT_SETTINGS = {
     "START_COUNTDOWN_SECONDS": "5",
     "MATCH_TIME_SECONDS": "300",
     "WIN_GUILD_CONTRIBUTION_PER_KD": "10",
+    "MATCH_MONEY_PER_KILL": "200",
+    "MATCH_WIN_BONUS": "2000",
+    "MATCH_MVP_BONUS": "500",
+    "ASSIST_WINDOW_SECONDS": "3",
+    "MATCH_ASSIST_WEIGHT": "0.5",
+    "MATCH_TK_WEIGHT": "1.5",
+    # 兼容旧键：若仍存在则忽略，以 MATCH_MONEY_PER_KILL 为准
     "MATCH_MONEY_PER_KD": "100",
 }
 
@@ -152,13 +159,43 @@ def _normalize_mode(raw: Dict[str, Any]) -> Dict[str, Any]:
         match_minutes = max(1, int(raw.get("match_time_minutes") or 5))
     except (TypeError, ValueError):
         match_minutes = 5
-    return {
+    from endstone_arc_shooter_game.loadout import normalize_acquire_key
+
+    acquire = normalize_acquire_key(raw.get("weapon_acquire"))
+    out: Dict[str, Any] = {
         "mode": mode,
         "max_players_per_team": max(1, int(raw.get("max_players_per_team") or 8)),
         "target_score": max(1, int(raw.get("target_score") or 50)),
         "match_time_minutes": match_minutes,
+        "weapon_acquire": acquire,
         "teams": _normalize_teams(raw.get("teams")),
     }
+    # 预设 / 随机 / 武器大师扩展字段原样保留（经轻度清洗）
+    preset = raw.get("preset_loadout")
+    if isinstance(preset, dict):
+        out["preset_loadout"] = {
+            "primary": str(preset.get("primary") or "").strip() or None,
+            "secondary": str(preset.get("secondary") or "").strip() or None,
+            "armor": str(preset.get("armor") or "").strip() or None,
+            "gadgets": [
+                str(g).strip()
+                for g in (preset.get("gadgets") or [])
+                if str(g or "").strip()
+            ],
+        }
+    if "random_gadget_count" in raw:
+        try:
+            out["random_gadget_count"] = max(0, int(raw.get("random_gadget_count") or 0))
+        except (TypeError, ValueError):
+            out["random_gadget_count"] = 0
+    if "random_include_armor" in raw:
+        out["random_include_armor"] = bool(raw.get("random_include_armor"))
+    master_ids = raw.get("master_weapon_ids")
+    if isinstance(master_ids, (list, tuple)):
+        out["master_weapon_ids"] = [str(x).strip() for x in master_ids if str(x or "").strip()]
+    elif isinstance(master_ids, str) and master_ids.strip():
+        out["master_weapon_ids"] = [master_ids.strip()]
+    return out
 
 
 def migrate_legacy_map(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -324,11 +361,171 @@ def playable_modes(map_cfg: Dict[str, Any]) -> List[str]:
 
 
 def match_kd_score(kills: int, deaths: int) -> int:
-    """Positive K-D used for post-match ARC Core rewards."""
+    """兼容旧逻辑：正的 K-D（已由 KDA 结算替代，测试仍可用）。"""
     try:
         return max(0, int(kills) - int(deaths))
     except (TypeError, ValueError):
         return 0
+
+
+def match_performance_score(
+    kills: int,
+    assists: int = 0,
+    team_kills: int = 0,
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> float:
+    """表现分：K + A×assist_weight − TK×tk_weight。"""
+    try:
+        return (
+            float(kills)
+            + float(assists) * float(assist_weight)
+            - float(team_kills) * float(tk_weight)
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def match_reward_coefficient(
+    kills: int,
+    deaths: int,
+    assists: int = 0,
+    team_kills: int = 0,
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> float:
+    """调节系数 (K + A×w_a − TK×w_tk) / max(D, 1)，下限 0。"""
+    score = match_performance_score(
+        kills,
+        assists,
+        team_kills,
+        assist_weight=assist_weight,
+        tk_weight=tk_weight,
+    )
+    try:
+        d = max(1, int(deaths))
+    except (TypeError, ValueError):
+        d = 1
+    return max(0.0, score / float(d))
+
+
+def calc_match_money(
+    kills: int,
+    deaths: int,
+    assists: int = 0,
+    team_kills: int = 0,
+    *,
+    money_per_kill: int = 200,
+    win_bonus: int = 0,
+    won: bool = False,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> int:
+    """赛后金钱：((击杀×单价) + 胜场奖) × KDA 调节系数。"""
+    try:
+        base = max(0, int(kills)) * max(0, int(money_per_kill))
+        if won:
+            base += max(0, int(win_bonus))
+        coeff = match_reward_coefficient(
+            kills,
+            deaths,
+            assists,
+            team_kills,
+            assist_weight=assist_weight,
+            tk_weight=tk_weight,
+        )
+        return max(0, int(round(base * coeff)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def match_mvp_score(
+    kills: int,
+    deaths: int,
+    assists: int = 0,
+    team_kills: int = 0,
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> float:
+    """队内 MVP 分：KDA 调节系数 + 击杀数/10。"""
+    coeff = match_reward_coefficient(
+        kills,
+        deaths,
+        assists,
+        team_kills,
+        assist_weight=assist_weight,
+        tk_weight=tk_weight,
+    )
+    try:
+        return float(coeff) + float(kills) / 10.0
+    except (TypeError, ValueError):
+        return float(coeff)
+
+
+def pick_team_mvp(
+    players: List[Any],
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> Optional[Any]:
+    """从队伍成员中选出 MVP（同分优先击杀、助攻、名字）。"""
+    best = None
+    best_key: Optional[Tuple[float, int, int, str]] = None
+    for ps in players or []:
+        try:
+            kills = int(getattr(ps, "kills", 0) or 0)
+            deaths = int(getattr(ps, "deaths", 0) or 0)
+            assists = int(getattr(ps, "assists", 0) or 0)
+            team_kills = int(getattr(ps, "team_kills", 0) or 0)
+            name = str(getattr(ps, "name", "") or "")
+        except (TypeError, ValueError):
+            continue
+        score = match_mvp_score(
+            kills,
+            deaths,
+            assists,
+            team_kills,
+            assist_weight=assist_weight,
+            tk_weight=tk_weight,
+        )
+        key = (score, kills, assists, name)
+        if best_key is None or key > best_key:
+            best_key = key
+            best = ps
+    return best
+
+
+def collect_assist_and_tk(
+    damage_times: Dict[str, float],
+    *,
+    now: float,
+    window: float,
+    killer_name: Optional[str],
+    victim_team: str,
+    team_of: Dict[str, str],
+) -> Tuple[List[str], List[str]]:
+    """死亡前 window 秒内：敌方伤害 → 助攻（不含击杀者）；友方伤害 → TK。"""
+    assists: List[str] = []
+    team_kills: List[str] = []
+    for name, ts in (damage_times or {}).items():
+        if not name or name == killer_name:
+            continue
+        try:
+            if float(now) - float(ts) > float(window):
+                continue
+        except (TypeError, ValueError):
+            continue
+        team = team_of.get(name)
+        if not team:
+            continue
+        if team == victim_team:
+            team_kills.append(name)
+        else:
+            assists.append(name)
+    return assists, team_kills
 
 
 def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
@@ -345,6 +542,11 @@ def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[s
         "max_players_per_team": int(mode_cfg.get("max_players_per_team") or 8),
         "target_score": int(mode_cfg.get("target_score") or 50),
         "match_time_minutes": max(1, int(mode_cfg.get("match_time_minutes") or 5)),
+        "weapon_acquire": mode_cfg.get("weapon_acquire") or "shop",
+        "preset_loadout": mode_cfg.get("preset_loadout"),
+        "random_gadget_count": mode_cfg.get("random_gadget_count"),
+        "random_include_armor": mode_cfg.get("random_include_armor"),
+        "master_weapon_ids": mode_cfg.get("master_weapon_ids"),
         "teams": mode_cfg.get("teams") or {},
     }
 
@@ -459,6 +661,15 @@ class SettingManager:
             return int(float(raw))
         except ValueError:
             return default
+
+    def GetSettingFloat(self, key: str, default: float = 0.0) -> float:
+        raw = self.GetSetting(key)
+        if raw is None:
+            return float(default)
+        try:
+            return float(raw)
+        except ValueError:
+            return float(default)
 
     def SetSetting(self, key: str, value: Any) -> None:
         self.setting_dict[key] = str(value)
@@ -575,7 +786,7 @@ class ConfigStore:
         return slot_layout(
             self.settings.GetSettingInt("PRIMARY_WEAPON_SLOTS", 1),
             self.settings.GetSettingInt("SECONDARY_WEAPON_SLOTS", 1),
-            self.settings.GetSettingInt("GADGET_SLOTS", 3),
+            self.settings.GetSettingInt("GADGET_SLOTS", 2),
         )
 
     def starting_points(self) -> int:
@@ -599,10 +810,30 @@ class ConfigStore:
         return max(60, self.settings.GetSettingInt("MATCH_TIME_SECONDS", 300))
 
     def win_guild_contribution_per_kd(self) -> int:
+        """胜队公会贡献：表现分 × 本倍率。"""
         return max(0, self.settings.GetSettingInt("WIN_GUILD_CONTRIBUTION_PER_KD", 10))
 
+    def match_money_per_kill(self) -> int:
+        return max(0, self.settings.GetSettingInt("MATCH_MONEY_PER_KILL", 200))
+
+    def match_win_bonus(self) -> int:
+        return max(0, self.settings.GetSettingInt("MATCH_WIN_BONUS", 2000))
+
+    def match_mvp_bonus(self) -> int:
+        return max(0, self.settings.GetSettingInt("MATCH_MVP_BONUS", 500))
+
+    def assist_window_seconds(self) -> float:
+        return max(0.5, self.settings.GetSettingFloat("ASSIST_WINDOW_SECONDS", 3.0))
+
+    def match_assist_weight(self) -> float:
+        return max(0.0, self.settings.GetSettingFloat("MATCH_ASSIST_WEIGHT", 0.5))
+
+    def match_tk_weight(self) -> float:
+        return max(0.0, self.settings.GetSettingFloat("MATCH_TK_WEIGHT", 1.5))
+
     def match_money_per_kd(self) -> int:
-        return max(0, self.settings.GetSettingInt("MATCH_MONEY_PER_KD", 100))
+        """已弃用，保留以免旧调用报错；请用 match_money_per_kill。"""
+        return self.match_money_per_kill()
 
     def weapons_of_type(self, weapon_type: str) -> List[Dict[str, Any]]:
         return [w for w in self.weapons.values() if w["type"] == weapon_type]

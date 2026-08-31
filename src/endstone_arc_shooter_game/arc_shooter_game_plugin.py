@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import math
+import random
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +22,11 @@ from endstone.event import (
 from endstone.form import ActionForm, Dropdown, ModalForm, TextInput
 from endstone.plugin import Plugin
 
+from endstone_arc_shooter_game.career_stats import (
+    CareerStore,
+    KD_TITLE_TIERS,
+    titles_unlocked_by_kd,
+)
 from endstone_arc_shooter_game.config import (
     IMPLEMENTED_MODES,
     KNOWN_MODES,
@@ -33,11 +39,15 @@ from endstone_arc_shooter_game.config import (
     mode_playable,
     playable_modes,
     point_in_region,
-    match_kd_score,
+    calc_match_money,
+    collect_assist_and_tk,
+    match_performance_score,
+    pick_team_mvp,
     slot_range,
 )
 from endstone_arc_shooter_game.inventory import (
     apply_armor_extras,
+    bind_arc_inventory,
     clear_armor,
     delete_snapshot_disk,
     give_to_end_slots,
@@ -50,6 +60,17 @@ from endstone_arc_shooter_game.inventory import (
     snapshot_player,
 )
 from endstone_arc_shooter_game.language import LanguageManager
+from endstone_arc_shooter_game.loadout import (
+    REASON_ALREADY_OWNED,
+    REASON_DISABLED,
+    REASON_INSUFFICIENT,
+    REASON_NO_SLOT,
+    REASON_UNKNOWN,
+    SlotCapacities,
+    WeaponAcquireStrategy,
+    owned_weapon_ids,
+    resolve_acquire_strategy,
+)
 from endstone_arc_shooter_game.session import (
     STATE_BUYING,
     STATE_COUNTDOWN,
@@ -95,7 +116,8 @@ ARC_COIN_HOTBAR_SLOT = 8
 SHOP_DEBOUNCE_SECONDS = 0.2
 SPAWN_PROTECT_SECONDS = 3
 MATCH_BUFF_DURATION_SECONDS = 1000000
-BUY_FREEZE_TOLERANCE = 0.35
+# 基岩版玩家默认行走速度；购买期设为 0，开局再恢复
+DEFAULT_MOVEMENT_SPEED = 0.1
 TEAM_NAME_COLOR = {
     TEAM_A: "§c",
     TEAM_B: "§9",
@@ -165,6 +187,8 @@ class ARCShooterGamePlugin(Plugin):
     prefix = "ARCShooterGame"
     api_version = "0.10"
     load = "POSTWORLD"
+    # 背包发放/扣除依赖弧光背包管理器
+    load_after = ["arc_inventory"]
 
     commands = {
         "gs": {
@@ -185,15 +209,18 @@ class ARCShooterGamePlugin(Plugin):
         super().__init__()
         self.config_store: Optional[ConfigStore] = None
         self.language_manager: Optional[LanguageManager] = None
+        self.career_store: Optional[CareerStore] = None
         self.lobbies: Dict[str, Lobby] = {}
         self.player_to_lobby: Dict[str, str] = {}
         self.backups: Dict[str, Dict[str, Any]] = {}
         self._last_attacker: Dict[str, Tuple[str, float]] = {}
+        # victim -> {attacker_name: last_damage_unix}
+        self._damage_log: Dict[str, Dict[str, float]] = {}
         self._shop_open_at: Dict[str, float] = {}
         self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
         self._spawn_protect_until: Dict[str, float] = {}
-        self._buy_freeze: Dict[str, Dict[str, Any]] = {}
+        self._buy_frozen: set[str] = set()
         self._tick_task = None
         self._fast_tick_task = None
 
@@ -216,9 +243,29 @@ class ARCShooterGamePlugin(Plugin):
         self.config_store = ConfigStore(logger=getattr(self, "logger", None))
         lang = self.config_store.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
         self.language_manager = LanguageManager(lang)
+        try:
+            self.career_store = CareerStore(logger=getattr(self, "logger", None))
+        except Exception as e:
+            self.career_store = None
+            self._safe_log("error", f"[ARCShooterGame] career store init failed: {e}")
         self._safe_log("info", "[ARCShooterGame] on_load")
 
     def on_enable(self) -> None:
+        inv = None
+        try:
+            inv = self.server.plugin_manager.get_plugin("arc_inventory")
+        except Exception:
+            inv = None
+        if inv is None:
+            self._safe_log(
+                "error",
+                "[ARCShooterGame] 未找到 arc_inventory（弧光背包管理器）。"
+                "请将 endstone_arc_inventory-*.whl 放入 plugins/ 后重启。",
+            )
+        else:
+            bind_arc_inventory(inv)
+            self._safe_log("info", "[ARCShooterGame] 已绑定 arc_inventory 背包 API")
+        self._ensure_kd_title_definitions()
         self.register_events(self)
         try:
             self._tick_task = self.server.scheduler.run_task(self, self._on_tick, delay=20, period=20)
@@ -233,6 +280,13 @@ class ARCShooterGamePlugin(Plugin):
         self._safe_log("info", "[ARCShooterGame] enabled")
 
     def on_disable(self) -> None:
+        bind_arc_inventory(None)
+        if self.career_store is not None:
+            try:
+                self.career_store.close()
+            except Exception:
+                pass
+            self.career_store = None
         try:
             self.server.scheduler.cancel_tasks(self)
         except Exception:
@@ -262,6 +316,57 @@ class ARCShooterGamePlugin(Plugin):
             if lobby.map_id == map_id:
                 return True
         return False
+
+    def _playable_maps(self) -> List[Dict[str, Any]]:
+        if self.config_store is None:
+            return []
+        return [
+            map_cfg
+            for map_cfg in self.config_store.maps.values()
+            if has_region(map_cfg) and playable_modes(map_cfg)
+        ]
+
+    def _free_playable_maps(self, exclude_lobby_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return [
+            map_cfg
+            for map_cfg in self._playable_maps()
+            if not self._map_in_use(map_cfg["id"], exclude_lobby_id=exclude_lobby_id)
+        ]
+
+    def _can_create_lobby(self) -> bool:
+        # 大厅数必须 <= 可玩地图数
+        return len(self.lobbies) < len(self._playable_maps())
+
+    def _assign_map_for_start(self, lobby: Lobby) -> Tuple[bool, str]:
+        """开局时占用空余地图；随机偏好则抽图抽模式。"""
+        assert self.config_store is not None
+        free = self._free_playable_maps(exclude_lobby_id=lobby.lobby_id)
+        if not lobby.prefer_random_map and lobby.map_id and lobby.mode and lobby.map_cfg:
+            if self._map_in_use(lobby.map_id, exclude_lobby_id=lobby.lobby_id):
+                return False, "busy"
+            # 已手选且仍空闲：重新绑定最新配置
+            map_cfg = self.config_store.maps.get(lobby.map_id)
+            if map_cfg is None or not playable_modes(map_cfg):
+                return False, "not_ready"
+            ok, reason = lobby.set_map_and_mode(map_cfg, lobby.mode)
+            return ok, reason if not ok else "ok"
+
+        if not free:
+            return False, "no_free_map"
+        map_cfg = random.choice(free)
+        modes = playable_modes(map_cfg)
+        if not modes:
+            return False, "no_free_map"
+        if (
+            not lobby.prefer_random_mode
+            and lobby.mode
+            and lobby.mode in modes
+        ):
+            mode = lobby.mode
+        else:
+            mode = random.choice(modes)
+        ok, reason = lobby.set_map_and_mode(map_cfg, mode)
+        return ok, reason if not ok else "ok"
 
     def _get_player(self, name: str) -> Optional[Player]:
         getter = getattr(self.server, "get_player", None)
@@ -353,7 +458,9 @@ class ARCShooterGamePlugin(Plugin):
             return
         killer_name = self._killer_name_from_source(getattr(event, "damage_source", None))
         if killer_name and killer_name != victim_name and self._lobby_of(killer_name) is lobby:
-            self._last_attacker[victim_name] = (killer_name, time.time())
+            now = time.time()
+            self._last_attacker[victim_name] = (killer_name, now)
+            self._damage_log.setdefault(victim_name, {})[killer_name] = now
 
     @event_handler
     def on_player_death(self, event: PlayerDeathEvent):
@@ -396,9 +503,25 @@ class ARCShooterGamePlugin(Plugin):
                         killer.send_message(
                             self._t("KILL_ENEMY").format(victim_name, result["reward"], result["killer_points"])
                         )
+                        self._send_kill_toast(killer, victim_name)
                 victim_player = self._get_player(victim_name)
                 if victim_player:
                     victim_player.send_message(self._t("PLAYER_KILLED").format(killer_name or "未知"))
+                self._credit_assists_and_tk(lobby, victim_name, killer_name)
+                if result["friendly"]:
+                    self._record_career_combat(killer_name, victim_name, friendly=True)
+                else:
+                    weapon_id = None
+                    if killer is not None:
+                        weapon_id = self._resolve_kill_weapon_id(
+                            killer, lobby.players.get(killer_name)
+                        )
+                    self._record_career_combat(
+                        killer_name,
+                        victim_name,
+                        weapon_id=weapon_id,
+                        friendly=False,
+                    )
                 self._broadcast(
                     lobby,
                     self._t("SCORE_UPDATE").format(
@@ -406,10 +529,15 @@ class ARCShooterGamePlugin(Plugin):
                     ),
                 )
                 if result["winner"]:
+                    self._damage_log.pop(victim_name, None)
+                    self._last_attacker.pop(victim_name, None)
                     self._end_match(lobby, result["winner"])
                     return
         elif ps is not None:
             ps.deaths += 1
+            self._record_career_death(victim_name)
+        self._damage_log.pop(victim_name, None)
+        self._last_attacker.pop(victim_name, None)
 
     @event_handler
     def on_player_respawn(self, event: PlayerRespawnEvent):
@@ -557,7 +685,16 @@ class ARCShooterGamePlugin(Plugin):
         if self._lobby_of(player.name) is not None:
             player.send_message(self._t("JOIN_FAIL_IN_GAME"))
             return
+        if not self._playable_maps():
+            player.send_message(self._t("CREATE_LOBBY_NO_MAPS"))
+            return
+        if not self._can_create_lobby():
+            player.send_message(
+                self._t("CREATE_LOBBY_FULL").format(len(self.lobbies), len(self._playable_maps()))
+            )
+            return
         lobby = Lobby(admin=player.name)
+        lobby.set_prefer_random(map_=True, mode=True)
         self.lobbies[lobby.lobby_id] = lobby
         ok, reason = lobby.join(player.name, self.config_store.starting_points() if self.config_store else 1000)
         if not ok:
@@ -591,9 +728,13 @@ class ARCShooterGamePlugin(Plugin):
         self.player_to_lobby[player.name] = lobby.lobby_id
         if lobby.state in (STATE_BUYING, STATE_PLAYING):
             self._notify(player, self._t("JOIN_OK_MATCH"))
+            strategy = self._acquire_strategy(lobby)
+            weapons = self.config_store.weapons if self.config_store else {}
+            strategy.assign_on_match_start(lobby.players[player.name], weapons, lobby.map_cfg or {})
             self._prepare_fighter(player, lobby)
+            self._restore_player_loadout(player, lobby, gadgets=True)
             self._apply_team_name_tag(player, lobby)
-            if lobby.state == STATE_BUYING:
+            if lobby.state == STATE_BUYING and strategy.uses_buy_phase:
                 self._set_buy_freeze(player)
             elif lobby.state == STATE_PLAYING:
                 self._apply_match_buffs(player)
@@ -693,19 +834,55 @@ class ARCShooterGamePlugin(Plugin):
             else:
                 player.send_message(self._t("START_NEED_PLAYERS"))
             return
+        assigned, assign_reason = self._assign_map_for_start(lobby)
+        if not assigned:
+            if assign_reason == "busy":
+                name = self._map_display_name(lobby.map_id)
+                if lobby.prefer_random_map:
+                    lobby.clear_map_selection()
+                else:
+                    # 手选图被占：清掉无效选择，让房主重选
+                    lobby.set_prefer_random(map_=True, mode=True)
+                player.send_message(self._t("MAP_SELECT_TAKEN").format(name))
+                self._show_map_select(player, lobby)
+            elif assign_reason == "no_free_map":
+                player.send_message(self._t("START_NO_FREE_MAP"))
+            else:
+                player.send_message(self._t("START_NEED_SPAWNS"))
+            return
+        # 分配后复核出生点等
+        ok, reason = lobby.can_start()
+        if not ok:
+            if lobby.prefer_random_map:
+                lobby.clear_map_selection()
+            if reason == "need_spawns":
+                player.send_message(self._t("START_NEED_SPAWNS"))
+            else:
+                player.send_message(self._t("START_NEED_PLAYERS"))
+            return
         buy_seconds = self.config_store.buy_time() if self.config_store else 20
         countdown = self.config_store.start_countdown() if self.config_store else 5
         starting = self.config_store.starting_points() if self.config_store else 1000
+        strategy = self._acquire_strategy(lobby)
         for ps in lobby.online_players():
             ps.points = starting
             ps.kills = 0
             ps.deaths = 0
-            ps.primary_id = None
-            ps.secondary_id = None
-            ps.armor_id = None
-            ps.gadgets = []
+            ps.assists = 0
+            ps.team_kills = 0
+            strategy.clear_for_match_start(ps)
         lobby.begin_countdown(countdown)
-        self._broadcast(lobby, self._t("START_BROADCAST").format(buy_seconds))
+        self._broadcast(
+            lobby,
+            self._t("START_MAP_ASSIGNED").format(
+                self._lobby_map_label(lobby),
+                self._lobby_mode_label(lobby),
+            ),
+        )
+        if strategy.uses_buy_phase:
+            self._broadcast(lobby, self._t("START_BROADCAST").format(buy_seconds))
+        else:
+            self._broadcast(lobby, self._t("START_BROADCAST_NO_BUY"))
         self._apply_lobby_name_tags(lobby)
         remain = int(math.ceil(lobby.countdown_remaining()))
         self._title_lobby(
@@ -717,6 +894,7 @@ class ARCShooterGamePlugin(Plugin):
             fade_out=5,
         )
         lobby.mark_announced(f"cd:{remain}")
+        self._refresh_lobby_menus(lobby)
 
     def _tick_start_countdown(self, lobby: Lobby, now: float) -> None:
         if not lobby.teams_ready_to_start():
@@ -741,13 +919,21 @@ class ARCShooterGamePlugin(Plugin):
             )
 
     def _finish_countdown_and_start(self, lobby: Lobby, now: float) -> None:
+        strategy = self._acquire_strategy(lobby)
         buy_seconds = self.config_store.buy_time() if self.config_store else 20
+        if not strategy.uses_buy_phase:
+            buy_seconds = 0
+        weapons = self.config_store.weapons if self.config_store else {}
+        mode_cfg = lobby.map_cfg or {}
         for ps in lobby.online_players():
             member = self._get_player(ps.name)
             if member is None:
                 continue
+            strategy.assign_on_match_start(ps, weapons, mode_cfg)
             self._prepare_fighter(member, lobby)
-            self._set_buy_freeze(member)
+            self._restore_player_loadout(member, lobby, gadgets=True)
+            if strategy.uses_buy_phase:
+                self._set_buy_freeze(member)
         self._apply_lobby_name_tags(lobby)
         lobby.begin_buy(buy_seconds, now)
         if buy_seconds <= 0:
@@ -822,8 +1008,12 @@ class ARCShooterGamePlugin(Plugin):
         self._tp_to_team_spawn(player, lobby)
         self._clear_player(player.name)
         clear_armor(player)
-        self._restore_player_loadout(player, lobby, gadgets=False)
         ps = lobby.players.get(player.name)
+        if ps is not None and lobby.state == STATE_PLAYING:
+            strategy = self._acquire_strategy(lobby)
+            weapons = self.config_store.weapons if self.config_store else {}
+            strategy.assign_on_respawn(ps, weapons, lobby.map_cfg or {})
+        self._restore_player_loadout(player, lobby, gadgets=True)
         if ps is not None:
             try:
                 self.server.scheduler.run_task(
@@ -852,6 +1042,10 @@ class ARCShooterGamePlugin(Plugin):
         lobby = self._lobby_of(player.name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             return False
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            return True
         now = time.time()
         last = self._shop_open_at.get(player.name, 0.0)
         if now - last < SHOP_DEBOUNCE_SECONDS:
@@ -960,6 +1154,138 @@ class ARCShooterGamePlugin(Plugin):
             return str(ident)
         return str(item_type or "")
 
+    def _player_xuid(self, player: Optional[Player]) -> str:
+        if player is None:
+            return ""
+        for attr in ("xuid", "uuid"):
+            val = getattr(player, attr, None)
+            if val:
+                return str(val)
+        return ""
+
+    def _resolve_kill_weapon_id(self, killer: Player, ps: Any) -> Optional[str]:
+        if self.config_store is None:
+            return None
+        held = self._hand_item_id(killer)
+        weapons = self.config_store.weapons
+        owned: List[str] = []
+        if ps is not None:
+            for wid in (ps.primary_id, ps.secondary_id, *(ps.gadgets or [])):
+                if wid:
+                    owned.append(str(wid))
+        if held:
+            for wid in owned:
+                w = weapons.get(wid)
+                if w and str(w.get("item") or "") == held:
+                    return wid
+            for wid, w in weapons.items():
+                if str(w.get("item") or "") == held:
+                    return wid
+        if owned:
+            return owned[0]
+        return None
+
+    def _record_career_death(self, name: str) -> None:
+        if self.career_store is None:
+            return
+        player = self._get_player(name)
+        try:
+            self.career_store.record_death(name, xuid=self._player_xuid(player))
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] career death {name}: {e}")
+
+    def _record_career_combat(
+        self,
+        killer_name: str,
+        victim_name: str,
+        *,
+        weapon_id: Optional[str] = None,
+        friendly: bool = False,
+    ) -> None:
+        if self.career_store is None:
+            return
+        killer = self._get_player(killer_name)
+        victim = self._get_player(victim_name)
+        try:
+            # 友军误杀：不记杀手击杀，也不记受害者死亡（避免无端 KD 被误伤）
+            if friendly:
+                return
+            self.career_store.record_death(victim_name, xuid=self._player_xuid(victim))
+            stats = self.career_store.record_kill(
+                killer_name,
+                weapon_id=weapon_id,
+                xuid=self._player_xuid(killer),
+            )
+            if killer is not None:
+                self._sync_kd_titles(killer, stats.kd)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] career combat: {e}")
+
+    def _record_career_match(self, name: str, *, won: bool, mvp: bool = False) -> None:
+        if self.career_store is None:
+            return
+        player = self._get_player(name)
+        try:
+            stats = self.career_store.record_match_end(
+                name, won=won, mvp=mvp, xuid=self._player_xuid(player)
+            )
+            if player is not None:
+                self._sync_kd_titles(player, stats.kd)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] career match {name}: {e}")
+
+    def _ensure_kd_title_definitions(self) -> None:
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+        except Exception:
+            core = None
+        if core is None or not hasattr(core, "api_ensure_title_definition"):
+            return
+        desc = self._t("CAREER_TITLE_DESC")
+        for _threshold, rarity, title in KD_TITLE_TIERS:
+            try:
+                core.api_ensure_title_definition(title, rarity, desc, 0.0, [])
+            except Exception as e:
+                self._safe_log("warning", f"[ARCShooterGame] ensure title {title}/{rarity}: {e}")
+
+    def _sync_kd_titles(self, player: Player, kd: float) -> None:
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+        except Exception:
+            core = None
+        if core is None:
+            return
+        unlocked = titles_unlocked_by_kd(kd)
+        if not unlocked:
+            return
+        for rarity, title in unlocked:
+            try:
+                if hasattr(core, "api_ensure_title_definition"):
+                    core.api_ensure_title_definition(
+                        title, rarity, self._t("CAREER_TITLE_DESC"), 0.0, []
+                    )
+                if hasattr(core, "api_unlock_title"):
+                    core.api_unlock_title(player, title, rarity)
+            except Exception as e:
+                self._safe_log("warning", f"[ARCShooterGame] unlock title {title}: {e}")
+
+    def _weapon_display_name(self, weapon_id: str) -> str:
+        if self.config_store is None:
+            return weapon_id
+        w = self.config_store.weapons.get(weapon_id)
+        if w:
+            return str(w.get("display_name") or weapon_id)
+        return weapon_id
+
+    def _rarity_color(self, rarity: str) -> str:
+        return {
+            "普通": "§7",
+            "稀有": "§9",
+            "史诗": "§5",
+            "传奇": "§6",
+            "神话": "§c",
+        }.get(str(rarity), "§f")
+
     def _notify(self, player: Player, message: str) -> None:
         player.send_message(message)
         if hasattr(player, "send_tip"):
@@ -1002,6 +1328,44 @@ class ARCShooterGamePlugin(Plugin):
                 pass
         player.send_message(f"[{title_s}] {content_s}".rstrip())
 
+    def _send_kill_toast(self, player: Player, victim_name: str) -> None:
+        # 基岩字形 \uE109 = 剑（与弧光核心 bedrock_glyphs.SWORD 一致）
+        sword = "\uE109"
+        title = self._t("KILL_TOAST_TITLE")
+        if sword not in title:
+            title = f"{sword} {title}".strip()
+        self._send_toast(player, title, self._t("KILL_TOAST_CONTENT").format(victim_name))
+
+    def _credit_assists_and_tk(
+        self,
+        lobby: Lobby,
+        victim_name: str,
+        killer_name: Optional[str],
+    ) -> None:
+        victim_ps = lobby.players.get(victim_name)
+        if victim_ps is None:
+            return
+        window = 3.0
+        if self.config_store is not None:
+            window = self.config_store.assist_window_seconds()
+        team_of = {name: p.team for name, p in lobby.players.items()}
+        assists, tks = collect_assist_and_tk(
+            self._damage_log.get(victim_name) or {},
+            now=time.time(),
+            window=window,
+            killer_name=killer_name,
+            victim_team=victim_ps.team,
+            team_of=team_of,
+        )
+        for name in assists:
+            lobby.apply_assist(name)
+            helper = self._get_player(name)
+            if helper is not None:
+                helper.send_message(self._t("ASSIST_CREDIT").format(victim_name))
+        for name in tks:
+            lobby.apply_team_kill_credit(name)
+        # 击杀者本人的友军击杀已在 apply_player_kill 计入 team_kills
+
     def _title_lobby(
         self,
         lobby: Lobby,
@@ -1037,8 +1401,10 @@ class ARCShooterGamePlugin(Plugin):
         )
 
     def _end_match(self, lobby: Lobby, winner: Optional[str], *, timed_out: bool = False) -> None:
-        rewards = self._distribute_match_rewards(lobby, winner)
-        result_content = self._match_result_content(lobby, winner, timed_out=timed_out, rewards=rewards)
+        rewards, mvp_names = self._distribute_match_rewards(lobby, winner)
+        result_content = self._match_result_content(
+            lobby, winner, timed_out=timed_out, rewards=rewards, mvp_names=mvp_names
+        )
         still = [ps.name for ps in lobby.online_players()]
         participants = {ps.name for ps in lobby.result_rows()}
         target_names = set(still) | participants
@@ -1046,6 +1412,9 @@ class ARCShooterGamePlugin(Plugin):
         a_name = lobby.team_name(TEAM_A)
         b_name = lobby.team_name(TEAM_B)
         score_a, score_b = lobby.score_a, lobby.score_b
+        for ps in lobby.result_rows():
+            won = bool(winner) and ps.team == winner
+            self._record_career_match(ps.name, won=won, mvp=ps.name in mvp_names)
         for name in still:
             self.player_to_lobby.pop(name, None)
             member = self._get_player(name)
@@ -1099,25 +1468,65 @@ class ARCShooterGamePlugin(Plugin):
 
     def _distribute_match_rewards(
         self, lobby: Lobby, winner: Optional[str]
-    ) -> Dict[str, Dict[str, int]]:
+    ) -> Tuple[Dict[str, Dict[str, int]], set]:
         rewards: Dict[str, Dict[str, int]] = {}
+        mvp_names: set = set()
         if self.config_store is None:
-            return rewards
-        money_mult = self.config_store.match_money_per_kd()
+            return rewards, mvp_names
+        money_per_kill = self.config_store.match_money_per_kill()
+        win_bonus = self.config_store.match_win_bonus()
+        mvp_bonus = self.config_store.match_mvp_bonus()
         contrib_mult = self.config_store.win_guild_contribution_per_kd()
-        if money_mult <= 0 and contrib_mult <= 0:
-            return rewards
+        assist_weight = self.config_store.match_assist_weight()
+        tk_weight = self.config_store.match_tk_weight()
+        if money_per_kill <= 0 and win_bonus <= 0 and contrib_mult <= 0 and mvp_bonus <= 0:
+            return rewards, mvp_names
         core = self._get_arc_core()
         if core is None:
             self._safe_log("warning", "[ARCShooterGame] arc_core not loaded; skip match rewards")
-            return rewards
-        for ps in lobby.result_rows():
-            kd = match_kd_score(ps.kills, ps.deaths)
-            if kd <= 0:
-                continue
-            money = kd * money_mult if money_mult > 0 else 0
-            contribution = kd * contrib_mult if winner and ps.team == winner and contrib_mult > 0 else 0
-            entry = {"money": 0, "contribution": 0}
+            return rewards, mvp_names
+
+        rows = lobby.result_rows()
+        for team_id in (TEAM_A, TEAM_B):
+            members = [p for p in rows if p.team == team_id]
+            mvp = pick_team_mvp(
+                members, assist_weight=assist_weight, tk_weight=tk_weight
+            )
+            if mvp is not None:
+                mvp_names.add(mvp.name)
+
+        for ps in rows:
+            won = bool(winner) and ps.team == winner
+            money = calc_match_money(
+                ps.kills,
+                ps.deaths,
+                ps.assists,
+                ps.team_kills,
+                money_per_kill=money_per_kill,
+                win_bonus=win_bonus,
+                won=won,
+                assist_weight=assist_weight,
+                tk_weight=tk_weight,
+            )
+            is_mvp = ps.name in mvp_names
+            if is_mvp and mvp_bonus > 0:
+                money += mvp_bonus
+            perf = max(
+                0.0,
+                match_performance_score(
+                    ps.kills,
+                    ps.assists,
+                    ps.team_kills,
+                    assist_weight=assist_weight,
+                    tk_weight=tk_weight,
+                ),
+            )
+            contribution = (
+                int(round(perf * contrib_mult))
+                if won and contrib_mult > 0 and perf > 0
+                else 0
+            )
+            entry = {"money": 0, "contribution": 0, "mvp": 1 if is_mvp else 0}
             if money > 0:
                 try:
                     if core.api_change_player_money(ps.name, float(money), notify=True):
@@ -1142,9 +1551,9 @@ class ARCShooterGamePlugin(Plugin):
                         "warning",
                         f"[ARCShooterGame] match guild contribution for {ps.name}: {e}",
                     )
-            if entry["money"] > 0 or entry["contribution"] > 0:
+            if entry["money"] > 0 or entry["contribution"] > 0 or is_mvp:
                 rewards[ps.name] = entry
-        return rewards
+        return rewards, mvp_names
 
     def _match_result_content(
         self,
@@ -1153,9 +1562,11 @@ class ARCShooterGamePlugin(Plugin):
         *,
         timed_out: bool = False,
         rewards: Optional[Dict[str, Dict[str, int]]] = None,
+        mvp_names: Optional[set] = None,
     ) -> str:
         a_name = self._colored_team_name(lobby, TEAM_A)
         b_name = self._colored_team_name(lobby, TEAM_B)
+        mvps = mvp_names or set()
         parts: List[str] = []
         if timed_out:
             parts.append(self._t("MATCH_END_TIME_NOTE"))
@@ -1172,16 +1583,21 @@ class ARCShooterGamePlugin(Plugin):
             )
             members = sorted(
                 [p for p in rows if p.team == team_id],
-                key=lambda p: (-int(p.kills), int(p.deaths), p.name),
+                key=lambda p: (-int(p.kills), -int(p.assists), int(p.deaths), p.name),
             )
             if not members:
                 parts.append(self._t("NO_PLAYER"))
             for ps in members:
+                label = self._colored_label(ps.name, ps.team)
+                if ps.name in mvps:
+                    label = self._t("MATCH_END_MVP_TAG") + label
                 parts.append(
                     self._t("MATCH_END_STATS_PLAYER").format(
-                        self._colored_label(ps.name, ps.team),
+                        label,
                         ps.kills,
                         ps.deaths,
+                        ps.assists,
+                        ps.team_kills,
                     )
                 )
         reward_map = rewards or {}
@@ -1189,6 +1605,8 @@ class ARCShooterGamePlugin(Plugin):
         parts.append(self._t("MATCH_END_REWARDS_HEADER"))
         for ps in rows:
             colored = self._colored_label(ps.name, ps.team)
+            if ps.name in mvps:
+                colored = self._t("MATCH_END_MVP_TAG") + colored
             entry = reward_map.get(ps.name)
             if entry:
                 money = int(entry.get("money", 0))
@@ -1328,17 +1746,19 @@ class ARCShooterGamePlugin(Plugin):
             f"effect {format_player_name(player_name)} clear",
         )
 
-    def _set_movement_permission(self, player_name: str, enabled: bool) -> None:
-        state = "enabled" if enabled else "disabled"
+    def _set_movement_speed(self, player_name: str, speed: float) -> None:
         try:
             self.server.dispatch_command(
                 self.server.command_sender,
-                f"inputpermission set {format_player_name(player_name)} movement {state}",
+                (
+                    f"attribute {format_player_name(player_name)} "
+                    f"minecraft:movement base set {float(speed)}"
+                ),
             )
         except Exception as e:
             self._safe_log(
                 "warning",
-                f"[ARCShooterGame] inputpermission movement for {player_name}: {e}",
+                f"[ARCShooterGame] set movement speed for {player_name}: {e}",
             )
 
     def _is_spawn_protected(self, player_name: str) -> bool:
@@ -1351,10 +1771,11 @@ class ARCShooterGamePlugin(Plugin):
         return True
 
     def _apply_spawn_protect(self, player: Player) -> None:
+        # 仅用 ActorDamageEvent 取消伤害实现无敌，不加隐身/抗性效果
         self._spawn_protect_until[player.name] = time.time() + SPAWN_PROTECT_SECONDS
-        # 隐身 + 抗性提升 V（中文常称保护 V）
-        self._dispatch_effect(player.name, "invisibility", SPAWN_PROTECT_SECONDS, 0)
-        self._dispatch_effect(player.name, "resistance", SPAWN_PROTECT_SECONDS, 4)
+        lobby = self._lobby_of(player.name)
+        if lobby is not None:
+            self._apply_team_name_tag(player, lobby)
 
     def _apply_match_buffs(self, player: Player) -> None:
         self._dispatch_effect(player.name, "speed", MATCH_BUFF_DURATION_SECONDS, 0)
@@ -1365,49 +1786,22 @@ class ARCShooterGamePlugin(Plugin):
         self._clear_effects(player_name)
 
     def _set_buy_freeze(self, player: Player) -> None:
-        loc = getattr(player, "location", None)
-        if loc is None:
-            return
-        self._buy_freeze[player.name] = {
-            "x": float(loc.x),
-            "y": float(loc.y),
-            "z": float(loc.z),
-            "dimension": dimension_id_of(loc),
-            "yaw": getattr(loc, "yaw", None),
-            "pitch": getattr(loc, "pitch", None),
-        }
-        self._set_movement_permission(player.name, False)
+        self._buy_frozen.add(player.name)
+        self._set_movement_speed(player.name, 0.0)
 
     def _clear_buy_freeze(self, player_name: str) -> None:
-        if player_name in self._buy_freeze:
-            self._buy_freeze.pop(player_name, None)
-            self._set_movement_permission(player_name, True)
+        if player_name not in self._buy_frozen:
+            return
+        self._buy_frozen.discard(player_name)
+        self._set_movement_speed(player_name, DEFAULT_MOVEMENT_SPEED)
 
     def _enforce_buy_freeze(self, lobby: Lobby) -> None:
         for ps in lobby.online_players():
-            anchor = self._buy_freeze.get(ps.name)
+            if ps.name in self._buy_frozen:
+                continue
             player = self._get_player(ps.name)
-            if player is None:
-                continue
-            if anchor is None:
+            if player is not None:
                 self._set_buy_freeze(player)
-                continue
-            loc = getattr(player, "location", None)
-            if loc is None:
-                continue
-            dx = float(loc.x) - float(anchor["x"])
-            dy = float(loc.y) - float(anchor["y"])
-            dz = float(loc.z) - float(anchor["z"])
-            if (dx * dx + dy * dy + dz * dz) > (BUY_FREEZE_TOLERANCE * BUY_FREEZE_TOLERANCE):
-                self._tp_player(
-                    player.name,
-                    float(anchor["x"]),
-                    float(anchor["y"]),
-                    float(anchor["z"]),
-                    str(anchor.get("dimension") or "overworld"),
-                    anchor.get("yaw"),
-                    anchor.get("pitch"),
-                )
 
     def _player_is_sneaking(self, player: Player) -> bool:
         for attr in ("is_sneaking", "sneaking", "is_crouching"):
@@ -1535,16 +1929,24 @@ class ARCShooterGamePlugin(Plugin):
     def _lobby_map_label(self, lobby: Lobby) -> str:
         if lobby.map_cfg:
             return str(lobby.map_cfg.get("display_name") or lobby.map_id)
+        if lobby.prefer_random_map:
+            return self._t("LOBBY_RANDOM_MAP")
         return self._t("LOBBY_LIST_NO_MAP")
 
     def _lobby_mode_label(self, lobby: Lobby) -> str:
         if lobby.mode:
             return self._mode_label(lobby.mode)
+        if lobby.prefer_random_mode:
+            return self._t("LOBBY_RANDOM_MODE")
         return self._t("LOBBY_LIST_NO_MODE")
 
-    def _team_name_tag(self, player_name: str, team_id: str) -> str:
+    def _team_name_tag(self, player_name: str, team_id: str, *, invincible: bool = False) -> str:
         color = TEAM_NAME_COLOR.get(team_id, "§f")
-        return f"{color}{player_name}"
+        name_line = f"{color}{player_name}"
+        if not invincible:
+            return name_line
+        prefix = self._t("NAME_TAG_INVINCIBLE")
+        return f"{prefix}\n{name_line}"
 
     def _apply_team_name_tag(self, player: Player, lobby: Lobby) -> None:
         ps = lobby.players.get(player.name)
@@ -1553,7 +1955,11 @@ class ARCShooterGamePlugin(Plugin):
         if player.name not in self._saved_name_tags:
             self._saved_name_tags[player.name] = str(getattr(player, "name_tag", "") or "")
         try:
-            player.name_tag = self._team_name_tag(player.name, ps.team)
+            player.name_tag = self._team_name_tag(
+                player.name,
+                ps.team,
+                invincible=self._is_spawn_protected(player.name),
+            )
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] set name_tag for {player.name}: {e}")
 
@@ -1638,6 +2044,8 @@ class ARCShooterGamePlugin(Plugin):
         return "\n".join(lines) if lines else self._t("MAP_MODES_NONE")
 
     def _lobby_hint_text(self, lobby: Lobby) -> str:
+        if lobby.prefer_random_map:
+            return self._t("LOBBY_CONTENT_HINT").format(self._t("LOBBY_HINT_RANDOM"))
         if not lobby.map_id:
             return self._t("LOBBY_CONTENT_HINT").format(self._t("LOBBY_HINT_NEED_MAP"))
         if not lobby.mode:
@@ -1655,13 +2063,62 @@ class ARCShooterGamePlugin(Plugin):
             return self._t("MAP_SELECT_BUTTON_MULTI").format(name, len(modes))
         return self._t("MAP_SELECT_BUTTON").format(name)
 
-    # ---------- shop ----------
+    # ---------- shop / weapon acquire ----------
+
+    def _acquire_strategy(self, lobby: Lobby) -> WeaponAcquireStrategy:
+        return resolve_acquire_strategy(lobby.map_cfg)
+
+    def _slot_capacities(self) -> SlotCapacities:
+        assert self.config_store is not None
+        return SlotCapacities.from_layout(self.config_store.layout())
+
+    def _apply_purchase_items(
+        self,
+        player: Player,
+        weapon: Dict[str, Any],
+        *,
+        old_id: Optional[str],
+        slot_index: int,
+    ) -> None:
+        assert self.config_store is not None
+        layout = self.config_store.layout()
+        wtype = str(weapon.get("type") or "")
+        if wtype == "armor":
+            if old_id and old_id in self.config_store.weapons:
+                remove_armor_extras(player, self.config_store.weapons[old_id].get("extras") or {})
+            apply_armor_extras(player, weapon.get("extras") or {}, int(weapon.get("data") or 0))
+            return
+        if old_id and old_id in self.config_store.weapons:
+            old = self.config_store.weapons[old_id]
+            for extra_id, extra_count in (old.get("extras") or {}).items():
+                remove_item_count(player, extra_id, extra_count)
+        start, end = slot_range(layout, wtype)
+        if end <= start:
+            return
+        slot = start + slot_index
+        if slot >= end:
+            return
+        set_slot_item(
+            player,
+            slot,
+            weapon["item"],
+            int(weapon.get("amount") or 1),
+            int(weapon.get("data") or 0),
+        )
+        reserved = int(layout["reserved"])
+        for extra_id, extra_count in (weapon.get("extras") or {}).items():
+            give_to_end_slots(player, extra_id, extra_count, reserved, 0)
+        self._apply_weapon_ammo(player, weapon)
 
     def _buy_weapon(self, player: Player, weapon_id: str) -> None:
         assert self.config_store is not None
         lobby = self._lobby_of(player.name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
+            return
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            player.send_message(self._t("SHOP_DISABLED_MODE"))
             return
         weapon = self.config_store.weapons.get(weapon_id)
         if weapon is None:
@@ -1670,41 +2127,39 @@ class ARCShooterGamePlugin(Plugin):
         ps = lobby.players.get(player.name)
         if ps is None:
             return
-        cost = int(weapon["cost"])
-        if ps.points < cost:
-            player.send_message(self._t("BUY_FAIL_POINTS").format(cost, ps.points))
-            self._show_shop_category(player, weapon["type"])
+        outcome = strategy.purchase(
+            ps,
+            weapon,
+            self.config_store.weapons,
+            self._slot_capacities(),
+        )
+        wtype = str(weapon.get("type") or "")
+        if not outcome.ok:
+            if outcome.reason == REASON_ALREADY_OWNED:
+                player.send_message(self._t("BUY_ALREADY_OWNED").format(weapon["display_name"]))
+            elif outcome.reason == REASON_NO_SLOT:
+                player.send_message(self._t("SHOP_NO_SLOT"))
+            elif outcome.reason == REASON_INSUFFICIENT:
+                player.send_message(self._t("BUY_FAIL_POINTS").format(outcome.pay, ps.points))
+            elif outcome.reason == REASON_UNKNOWN:
+                player.send_message(self._t("BUY_FAIL_UNKNOWN"))
+            elif outcome.reason == REASON_DISABLED:
+                player.send_message(self._t("SHOP_DISABLED_MODE"))
+            self._show_shop_category(player, wtype)
             return
-        layout = self.config_store.layout()
-        wtype = weapon["type"]
-        if wtype == "armor":
-            _, old_id = lobby.record_purchase(player.name, weapon, 1)
-            ps.points -= cost
-            if old_id and old_id in self.config_store.weapons:
-                remove_armor_extras(player, self.config_store.weapons[old_id].get("extras") or {})
-            apply_armor_extras(player, weapon.get("extras") or {}, int(weapon.get("data") or 0))
-            player.send_message(self._t("BUY_OK").format(weapon["display_name"], ps.points))
-            self._show_shop_category(player, "armor")
-            return
-        start, end = slot_range(layout, wtype)
-        capacity = end - start
-        if capacity <= 0:
-            player.send_message(self._t("SHOP_NO_SLOT"))
-            return
-        idx, old_id = lobby.record_purchase(player.name, weapon, capacity)
-        ps.points -= cost
-        if old_id and old_id in self.config_store.weapons:
-            old = self.config_store.weapons[old_id]
-            for extra_id, extra_count in (old.get("extras") or {}).items():
-                remove_item_count(player, extra_id, extra_count)
-        slot = start + idx
-        set_slot_item(player, slot, weapon["item"], int(weapon.get("amount") or 1), int(weapon.get("data") or 0))
-        reserved = int(layout["reserved"])
-        for extra_id, extra_count in (weapon.get("extras") or {}).items():
-            give_to_end_slots(player, extra_id, extra_count, reserved, 0)
-        self._apply_weapon_ammo(player, weapon)
-        player.send_message(self._t("BUY_OK").format(weapon["display_name"], ps.points))
-        self._show_shop_category(player, weapon["type"])
+        self._apply_purchase_items(
+            player,
+            weapon,
+            old_id=outcome.old_id,
+            slot_index=outcome.slot_index,
+        )
+        if outcome.credit > 0:
+            player.send_message(
+                self._t("BUY_OK_UPGRADE").format(weapon["display_name"], outcome.pay, outcome.points_left)
+            )
+        else:
+            player.send_message(self._t("BUY_OK").format(weapon["display_name"], outcome.points_left))
+        self._show_shop_category(player, wtype)
 
     # ---------- ui ----------
 
@@ -1719,12 +2174,53 @@ class ARCShooterGamePlugin(Plugin):
         try:
             form = ActionForm(title=self._t("MENU_TITLE"), content=self._t("MENU_CONTENT"))
             form.add_button(self._t("BTN_LOBBY_LIST"), on_click=lambda sender: self._show_lobby_list(sender))
+            form.add_button(self._t("BTN_PROFILE"), on_click=lambda sender: self._show_profile(sender))
             if self._is_op(player):
                 form.add_button(self._t("BTN_CONFIG_MAPS"), on_click=lambda sender: self._show_config_maps(sender))
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
             player.send_form(form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] root menu: {e}\n{traceback.format_exc()}")
+            player.send_message(self._t("PANEL_ERROR"))
+
+    def _profile_content(self, stats) -> str:
+        rarity = stats.title_rarity
+        title = stats.title_name
+        color = self._rarity_color(rarity)
+        lines = [
+            self._t("PROFILE_LINE_KD").format(stats.kills, stats.deaths, f"{stats.kd:.2f}"),
+            self._t("PROFILE_LINE_MATCHES").format(stats.matches, stats.wins, stats.mvps),
+            self._t("PROFILE_LINE_TITLE").format(color, rarity, title),
+            "",
+            self._t("PROFILE_WEAPON_HEADER"),
+        ]
+        if not stats.weapon_kills:
+            lines.append(self._t("PROFILE_WEAPON_EMPTY"))
+        else:
+            for wid, kills in list(stats.weapon_kills.items())[:12]:
+                lines.append(
+                    self._t("PROFILE_WEAPON_LINE").format(
+                        self._weapon_display_name(wid), kills
+                    )
+                )
+        return "\n".join(lines)
+
+    def _show_profile(self, player: Player) -> None:
+        try:
+            if self.career_store is None:
+                player.send_message(self._t("PROFILE_UNAVAILABLE"))
+                return
+            stats = self.career_store.get(player.name)
+            # 打开面板时同步头衔（含见习枪手）
+            self._sync_kd_titles(player, stats.kd)
+            form = ActionForm(
+                title=self._t("PROFILE_TITLE").format(player.name),
+                content=self._profile_content(stats),
+            )
+            form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
+            player.send_form(form)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] profile: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
 
     def _show_lobby_list(self, player: Player) -> None:
@@ -1776,7 +2272,10 @@ class ARCShooterGamePlugin(Plugin):
             form = ActionForm(title=self._t("LOBBY_TITLE"), content=content)
             is_admin = lobby.admin == player.name
             if is_admin and lobby.state == STATE_LOBBY:
-                map_mode_btn = self._t("BTN_CHANGE_MAP_MODE") if lobby.map_cfg else self._t("BTN_SELECT_MAP_MODE")
+                if lobby.prefer_random_map:
+                    map_mode_btn = self._t("BTN_SELECT_MAP_MODE")
+                else:
+                    map_mode_btn = self._t("BTN_CHANGE_MAP_MODE")
                 form.add_button(
                     map_mode_btn,
                     on_click=lambda sender, lb=lobby: self._show_map_select(sender, lb),
@@ -1805,12 +2304,20 @@ class ARCShooterGamePlugin(Plugin):
             if self._map_in_use(map_cfg["id"], exclude_lobby_id=lobby.lobby_id):
                 continue
             candidates.append(map_cfg)
+        form = ActionForm(title=self._t("MAP_SELECT_TITLE"), content=self._t("MAP_SELECT_CONTENT"))
+        form.add_button(
+            self._t("BTN_RANDOM_MAP_MODE"),
+            on_click=lambda sender, lb=lobby: self._select_random_map_mode(sender, lb),
+        )
         if not candidates:
             form = ActionForm(title=self._t("MAP_SELECT_TITLE"), content=self._t("MAP_SELECT_EMPTY"))
+            form.add_button(
+                self._t("BTN_RANDOM_MAP_MODE"),
+                on_click=lambda sender, lb=lobby: self._select_random_map_mode(sender, lb),
+            )
             form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
             player.send_form(form)
             return
-        form = ActionForm(title=self._t("MAP_SELECT_TITLE"), content=self._t("MAP_SELECT_CONTENT"))
         for map_cfg in candidates:
             label = self._map_select_button_label(map_cfg)
             mid = map_cfg["id"]
@@ -1818,26 +2325,77 @@ class ARCShooterGamePlugin(Plugin):
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
         player.send_form(form)
 
+    def _map_display_name(self, map_id: Optional[str]) -> str:
+        if not map_id or self.config_store is None:
+            return str(map_id or "?")
+        map_cfg = self.config_store.maps.get(map_id)
+        if map_cfg:
+            return str(map_cfg.get("display_name") or map_id)
+        return str(map_id)
+
+    def _notify_map_taken_and_reselect(self, player: Player, lobby: Lobby, map_id: str) -> None:
+        """选图瞬间被占用：提示并让房主重新打开选图。"""
+        player.send_message(self._t("MAP_SELECT_TAKEN").format(self._map_display_name(map_id)))
+        # 自己仍记着这张图、但实际已被别人占用 → 清掉脏状态
+        if lobby.map_id == map_id and self._map_in_use(map_id, exclude_lobby_id=lobby.lobby_id):
+            lobby.set_prefer_random(map_=True, mode=True)
+        self._show_map_select(player, lobby)
+
+    def _try_claim_map(self, lobby: Lobby, map_id: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """点击选图时再次校验占用，通过则立刻写入 map_id 占住。"""
+        assert self.config_store is not None
+        map_cfg = self.config_store.maps.get(map_id)
+        if map_cfg is None or not has_region(map_cfg) or not playable_modes(map_cfg):
+            return False, None
+        if self._map_in_use(map_id, exclude_lobby_id=lobby.lobby_id):
+            return False, map_cfg
+        lobby.prefer_random_map = False
+        lobby.map_id = map_id
+        return True, map_cfg
+
+    def _select_random_map_mode(self, player: Player, lobby: Lobby) -> None:
+        if lobby.admin != player.name or lobby.state != STATE_LOBBY:
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return
+        lobby.set_prefer_random(map_=True, mode=True)
+        player.send_message(self._t("MAP_SELECT_RANDOM_OK"))
+        self._show_lobby_menu(player, lobby)
+
     def _select_map(self, player: Player, lobby: Lobby, map_id: str) -> None:
         assert self.config_store is not None
+        if lobby.admin != player.name or lobby.state != STATE_LOBBY:
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return
         map_cfg = self.config_store.maps.get(map_id)
         if map_cfg is None or not has_region(map_cfg) or not playable_modes(map_cfg):
             player.send_message(self._t("MAP_SELECT_NOT_READY"))
             self._show_map_select(player, lobby)
             return
+        # 表单生成时可能空闲，点击时再验一次（防抢选）
         if self._map_in_use(map_id, exclude_lobby_id=lobby.lobby_id):
-            player.send_message(self._t("MAP_SELECT_BUSY"))
-            self._show_map_select(player, lobby)
+            self._notify_map_taken_and_reselect(player, lobby, map_id)
             return
-        lobby.map_id = map_id
+        claimed, claimed_cfg = self._try_claim_map(lobby, map_id)
+        if not claimed or claimed_cfg is None:
+            # 极短窗口内再次被占用
+            self._notify_map_taken_and_reselect(player, lobby, map_id)
+            return
+        map_cfg = claimed_cfg
         modes = playable_modes(map_cfg)
         if len(modes) == 1:
+            lobby.prefer_random_mode = False
             ok, _reason = lobby.set_map_and_mode(map_cfg, modes[0])
             if ok:
                 player.send_message(self._t("MAP_SELECT_OK").format(map_cfg.get("display_name") or map_id))
                 player.send_message(self._t("MODE_SELECT_OK").format(self._mode_label(modes[0])))
                 self._show_lobby_menu(player, lobby)
                 return
+            # 绑定失败则释放并重选
+            lobby.set_prefer_random(map_=True, mode=True)
+            player.send_message(self._t("MAP_SELECT_NOT_READY"))
+            self._show_map_select(player, lobby)
+            return
+        lobby.prefer_random_mode = True
         lobby.mode = None
         lobby.map_cfg = None
         player.send_message(self._t("MAP_SELECT_OK").format(map_cfg.get("display_name") or map_id))
@@ -1875,16 +2433,26 @@ class ARCShooterGamePlugin(Plugin):
 
     def _select_mode(self, player: Player, lobby: Lobby, mode: str) -> None:
         assert self.config_store is not None
-        map_cfg = self.config_store.maps.get(lobby.map_id or "")
+        if lobby.admin != player.name or lobby.state != STATE_LOBBY:
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return
+        map_id = lobby.map_id or ""
+        map_cfg = self.config_store.maps.get(map_id)
         if map_cfg is None:
             player.send_message(self._t("MAP_SELECT_NOT_READY"))
             self._show_lobby_menu(player, lobby)
+            return
+        # 选模式前再确认该图仍由本大厅占用（防止异常状态）
+        if self._map_in_use(map_id, exclude_lobby_id=lobby.lobby_id):
+            self._notify_map_taken_and_reselect(player, lobby, map_id)
             return
         ok, reason = lobby.set_map_and_mode(map_cfg, mode)
         if not ok:
             player.send_message(self._t("MAP_SELECT_NOT_READY"))
             self._show_mode_select(player, lobby)
             return
+        lobby.prefer_random_map = False
+        lobby.prefer_random_mode = False
         player.send_message(self._t("MODE_SELECT_OK").format(self._mode_label(mode)))
         self._show_lobby_menu(player, lobby)
 
@@ -1962,6 +2530,7 @@ class ARCShooterGamePlugin(Plugin):
             ps.points,
             ps.kills,
             ps.deaths,
+            ps.assists,
         )
         form = ActionForm(title=self._t("MATCH_TITLE").format(lobby.display_name), content=content)
         form.add_button(self._t("BTN_SHOP"), on_click=lambda sender: self._show_shop(sender))
@@ -1986,6 +2555,10 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            return
         ps = lobby.players.get(player.name)
         if ps is None:
             return
@@ -2009,6 +2582,10 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            return
         ps = lobby.players.get(player.name)
         if ps is None or self.config_store is None:
             return
@@ -2031,10 +2608,17 @@ class ARCShooterGamePlugin(Plugin):
             form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
             player.send_form(form)
             return
-        owned = set(filter(None, [ps.primary_id, ps.secondary_id, ps.armor_id, *ps.gadgets]))
+        owned = owned_weapon_ids(ps)
+        capacities = self._slot_capacities()
         for weapon in weapons:
             owned_mark = self._t("SHOP_OWNED") if weapon["id"] in owned else ""
-            label = self._t("SHOP_ITEM").format(weapon["display_name"], weapon["cost"], owned_mark)
+            quote = strategy.quote(ps, weapon, self.config_store.weapons, capacities)
+            if quote.is_upgrade:
+                label = self._t("SHOP_ITEM_UPGRADE").format(
+                    weapon["display_name"], quote.pay, weapon["cost"], owned_mark
+                )
+            else:
+                label = self._t("SHOP_ITEM").format(weapon["display_name"], weapon["cost"], owned_mark)
             wid = weapon["id"]
             form.add_button(label, on_click=lambda sender, w=wid: self._buy_weapon(sender, w))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))

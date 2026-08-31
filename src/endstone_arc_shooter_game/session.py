@@ -95,12 +95,13 @@ class PlayerState:
     points: int
     kills: int = 0
     deaths: int = 0
+    assists: int = 0
+    team_kills: int = 0
     primary_id: Optional[str] = None
     secondary_id: Optional[str] = None
     armor_id: Optional[str] = None
     gadgets: List[Optional[str]] = field(default_factory=list)
     still_in: bool = True
-
 
 @dataclass
 class Lobby:
@@ -109,6 +110,9 @@ class Lobby:
     map_id: Optional[str] = None
     mode: Optional[str] = None
     map_cfg: Optional[Dict[str, Any]] = None
+    # 默认随机；开局时再占用空余地图。手动选图后置 False。
+    prefer_random_map: bool = True
+    prefer_random_mode: bool = True
     state: str = STATE_LOBBY
     lobby_started_at: float = 0.0
     countdown_ends_at: float = 0.0
@@ -265,19 +269,32 @@ class Lobby:
         self.map_cfg = runtime
         return True, "ok"
 
+    def clear_map_selection(self) -> None:
+        self.map_id = None
+        self.mode = None
+        self.map_cfg = None
+
+    def set_prefer_random(self, *, map_: bool = True, mode: bool = True) -> None:
+        self.prefer_random_map = bool(map_)
+        self.prefer_random_mode = bool(mode)
+        if self.prefer_random_map:
+            self.clear_map_selection()
+
     def can_start(self) -> Tuple[bool, str]:
         if self.state != STATE_LOBBY:
             return False, "not_lobby"
-        if not self.map_id or not self.mode or self.map_cfg is None:
+        has_map = bool(self.map_id and self.mode and self.map_cfg)
+        if not has_map and not self.prefer_random_map:
             return False, "need_map"
-        if self.active_mode not in IMPLEMENTED_MODES:
-            return False, "unimplemented"
         if self.player_count() < 2:
             return False, "need_players"
         if self.team_count(TEAM_A) == 0 or self.team_count(TEAM_B) == 0:
             return False, "need_players"
-        if not self.team_spawns(TEAM_A) or not self.team_spawns(TEAM_B):
-            return False, "need_spawns"
+        if has_map:
+            if self.active_mode not in IMPLEMENTED_MODES:
+                return False, "unimplemented"
+            if not self.team_spawns(TEAM_A) or not self.team_spawns(TEAM_B):
+                return False, "need_spawns"
         return True, "ok"
 
     def begin_countdown(self, countdown_seconds: int, now: Optional[float] = None) -> None:
@@ -304,6 +321,9 @@ class Lobby:
         self.state = STATE_LOBBY
         self.countdown_ends_at = 0.0
         self.announced_secs = set()
+        # 随机偏好时释放地图，避免空占
+        if self.prefer_random_map:
+            self.clear_map_selection()
 
     def lobby_timed_out(self, timeout_seconds: int, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
@@ -371,12 +391,27 @@ class Lobby:
         self.score_a = result["score_a"]
         self.score_b = result["score_b"]
         killer.points = result["killer_points"]
-        victim.deaths += 1
         if not result["friendly"]:
+            victim.deaths += 1
             killer.kills += 1
+        else:
+            killer.team_kills += 1
         result["killer"] = killer
         result["victim"] = victim
         return result
+
+    def apply_assist(self, player_name: str) -> None:
+        ps = self.players.get(player_name)
+        if ps is None or not ps.still_in:
+            return
+        ps.assists += 1
+
+    def apply_team_kill_credit(self, player_name: str) -> None:
+        """友军伤害助攻式 TK（击杀者本人已在 apply_player_kill 计入）。"""
+        ps = self.players.get(player_name)
+        if ps is None or not ps.still_in:
+            return
+        ps.team_kills += 1
 
     def remaining_winner(self) -> Optional[str]:
         a = self.team_count(TEAM_A)
@@ -398,32 +433,14 @@ class Lobby:
         return rows
 
     def record_purchase(self, player_name: str, weapon: Dict[str, Any], gadget_capacity: int) -> Tuple[int, Optional[str]]:
+        from endstone_arc_shooter_game.loadout import record_owned
+
         ps = self.players.get(player_name)
         if ps is None:
             return 0, None
-        wtype = weapon["type"]
-        wid = weapon["id"]
-        if wtype == "primary":
-            old = ps.primary_id
-            ps.primary_id = wid
-            return 0, old
-        if wtype == "secondary":
-            old = ps.secondary_id
-            ps.secondary_id = wid
-            return 0, old
-        if wtype == "armor":
-            old = ps.armor_id
-            ps.armor_id = wid
-            return 0, old
-        if len(ps.gadgets) < gadget_capacity:
-            ps.gadgets.extend([None] * (gadget_capacity - len(ps.gadgets)))
-        idx = first_empty_or_first(ps.gadgets, gadget_capacity)
-        old = ps.gadgets[idx] if idx < len(ps.gadgets) else None
-        if idx >= len(ps.gadgets):
-            ps.gadgets.append(wid)
-        else:
-            ps.gadgets[idx] = wid
-        return idx, old
+        wtype = str(weapon.get("type") or "")
+        capacity = 1 if wtype in ("primary", "secondary", "armor") else max(0, int(gadget_capacity))
+        return record_owned(ps, weapon, capacity)
 
 
 # 兼容旧测试/引用

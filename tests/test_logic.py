@@ -21,6 +21,19 @@ from endstone_arc_shooter_game.config import (
     validate_map,
     validate_weapon,
 )
+from endstone_arc_shooter_game.loadout import (
+    ACQUIRE_PRESET,
+    ACQUIRE_SHOP,
+    REASON_ALREADY_OWNED,
+    REASON_INSUFFICIENT,
+    SlotCapacities,
+    ShopAcquireStrategy,
+    apply_shop_purchase,
+    assign_preset_loadout,
+    normalize_acquire_key,
+    quote_shop_purchase,
+    resolve_acquire_strategy,
+)
 from endstone_arc_shooter_game.map_db import MapDatabase
 from endstone_arc_shooter_game.session import (
     STATE_BUYING,
@@ -30,6 +43,7 @@ from endstone_arc_shooter_game.session import (
     TEAM_A,
     TEAM_B,
     Lobby,
+    PlayerState,
     apply_kill,
     first_empty_or_first,
     pick_spawn,
@@ -276,11 +290,35 @@ class LobbyTests(unittest.TestCase):
 
     def test_cannot_start_without_map(self):
         lobby = Lobby(admin="alice")
+        lobby.prefer_random_map = False
+        lobby.prefer_random_mode = False
         lobby.join("alice", 800, now=1)
         lobby.join("bob", 800, now=2)
         ok, reason = lobby.can_start()
         self.assertFalse(ok)
         self.assertEqual(reason, "need_map")
+
+    def test_can_start_with_random_preference(self):
+        lobby = Lobby(admin="alice")
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        self.assertTrue(lobby.prefer_random_map)
+        ok, reason = lobby.can_start()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_cancel_countdown_releases_random_map(self):
+        lobby = self._lobby_with_map()
+        lobby.prefer_random_map = True
+        lobby.prefer_random_mode = True
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.begin_countdown(5, now=10)
+        self.assertIsNotNone(lobby.map_id)
+        lobby.cancel_countdown()
+        self.assertIsNone(lobby.map_id)
+        self.assertIsNone(lobby.mode)
+        self.assertIsNone(lobby.map_cfg)
 
     def test_can_start_with_map_and_mode(self):
         lobby = self._lobby_with_map()
@@ -347,6 +385,18 @@ class LobbyTests(unittest.TestCase):
         self.assertEqual(lobby.players["bob"].deaths, 3)
         self.assertEqual(lobby.players["alice"].points, 1100)
 
+    def test_friendly_fire_skips_match_kd(self):
+        lobby = self._lobby_with_map()
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        lobby.players["bob"].team = lobby.players["alice"].team
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        result = lobby.apply_player_kill("alice", "bob", 100)
+        self.assertTrue(result["friendly"])
+        self.assertEqual(lobby.players["alice"].kills, 0)
+        self.assertEqual(lobby.players["bob"].deaths, 0)
+
     def test_gadget_fills_then_replaces_first(self):
         lobby = Lobby(admin="alice")
         lobby.join("alice", 800, now=1)
@@ -410,15 +460,161 @@ class LobbyTests(unittest.TestCase):
         self.assertEqual(match_kd_score(2, 5), 0)
         self.assertEqual(match_kd_score(3, 3), 0)
 
+    def test_match_kda_coefficient_and_money(self):
+        from endstone_arc_shooter_game.config import (
+            calc_match_money,
+            collect_assist_and_tk,
+            match_reward_coefficient,
+        )
+
+        # 10/12/5 无 TK → (10+2.5)/12
+        coeff = match_reward_coefficient(10, 12, 5, 0)
+        self.assertAlmostEqual(coeff, 12.5 / 12.0, places=5)
+        money = calc_match_money(
+            10, 12, 5, 0, money_per_kill=200, win_bonus=2000, won=False
+        )
+        self.assertEqual(money, int(round(2000 * (12.5 / 12.0))))
+        win_money = calc_match_money(
+            10, 12, 5, 0, money_per_kill=200, win_bonus=2000, won=True
+        )
+        self.assertEqual(win_money, int(round(4000 * (12.5 / 12.0))))
+        # 死亡为 0 时按 1 除
+        self.assertAlmostEqual(match_reward_coefficient(5, 0, 0, 0), 5.0)
+        from endstone_arc_shooter_game.config import match_mvp_score, pick_team_mvp
+        from endstone_arc_shooter_game.session import PlayerState, TEAM_A
+
+        self.assertAlmostEqual(match_mvp_score(10, 12, 5, 0), 12.5 / 12.0 + 1.0, places=5)
+        a = PlayerState(name="a", team=TEAM_A, points=0, kills=10, deaths=12, assists=5)
+        b = PlayerState(name="b", team=TEAM_A, points=0, kills=8, deaths=2, assists=0)
+        # b: coeff=8/2=4 + 0.8 = 4.8 > a ≈ 2.04
+        self.assertEqual(pick_team_mvp([a, b]).name, "b")
+        assists, tks = collect_assist_and_tk(
+            {"alice": 10.0, "bob": 9.5, "carol": 1.0, "dave": 9.8},
+            now=10.0,
+            window=3.0,
+            killer_name="alice",
+            victim_team="a",
+            team_of={"alice": "b", "bob": "b", "carol": "b", "dave": "a"},
+        )
+        self.assertEqual(assists, ["bob"])
+        self.assertEqual(tks, ["dave"])
+
     def test_match_reward_amounts(self):
         store = ConfigStore.__new__(ConfigStore)
-        store.settings = type("S", (), {"GetSettingInt": lambda self, key, default=0: {
-            "WIN_GUILD_CONTRIBUTION_PER_KD": 10,
-            "MATCH_MONEY_PER_KD": 100,
-        }.get(key, default)})()
-        kd = match_kd_score(8, 3)
-        self.assertEqual(kd * store.match_money_per_kd(), 500)
-        self.assertEqual(kd * store.win_guild_contribution_per_kd(), 50)
+        store.settings = type("S", (), {
+            "GetSettingInt": lambda self, key, default=0: {
+                "WIN_GUILD_CONTRIBUTION_PER_KD": 10,
+                "MATCH_MONEY_PER_KILL": 200,
+                "MATCH_WIN_BONUS": 2000,
+            }.get(key, default),
+            "GetSettingFloat": lambda self, key, default=0.0: {
+                "MATCH_ASSIST_WEIGHT": 0.5,
+                "MATCH_TK_WEIGHT": 1.5,
+                "ASSIST_WINDOW_SECONDS": 3.0,
+            }.get(key, default),
+        })()
+        from endstone_arc_shooter_game.config import calc_match_money
+
+        money = calc_match_money(
+            8, 3, 2, 0,
+            money_per_kill=store.match_money_per_kill(),
+            win_bonus=store.match_win_bonus(),
+            won=True,
+            assist_weight=store.match_assist_weight(),
+            tk_weight=store.match_tk_weight(),
+        )
+        # base=(8*200+2000)=3600, coeff=(8+1)/3=3 → 10800
+        self.assertEqual(money, 10800)
+
+
+class ShopLoadoutTests(unittest.TestCase):
+    def setUp(self):
+        self.weapons = {
+            "cheap": {
+                "id": "cheap",
+                "display_name": "便宜枪",
+                "item": "minecraft:stick",
+                "cost": 500,
+                "type": "primary",
+            },
+            "pricey": {
+                "id": "pricey",
+                "display_name": "贵枪",
+                "item": "minecraft:bow",
+                "cost": 900,
+                "type": "primary",
+            },
+            "nade": {
+                "id": "nade",
+                "display_name": "手雷",
+                "item": "minecraft:snowball",
+                "cost": 90,
+                "type": "gadget",
+            },
+        }
+        self.caps = SlotCapacities(primary=1, secondary=1, gadget=2, armor=1)
+        self.ps = PlayerState(name="p1", team=TEAM_A, points=1000)
+
+    def test_upgrade_pays_difference(self):
+        cheap = self.weapons["cheap"]
+        pricey = self.weapons["pricey"]
+        first = apply_shop_purchase(self.ps, cheap, self.weapons, self.caps)
+        self.assertTrue(first.ok)
+        self.assertEqual(first.pay, 500)
+        self.assertEqual(self.ps.points, 500)
+        quote = quote_shop_purchase(self.ps, pricey, self.weapons, self.caps)
+        self.assertEqual(quote.pay, 400)
+        self.assertEqual(quote.credit, 500)
+        self.assertTrue(quote.is_upgrade)
+        second = apply_shop_purchase(self.ps, pricey, self.weapons, self.caps)
+        self.assertTrue(second.ok)
+        self.assertEqual(second.pay, 400)
+        self.assertEqual(self.ps.primary_id, "pricey")
+        self.assertEqual(self.ps.points, 100)
+
+    def test_already_owned(self):
+        cheap = self.weapons["cheap"]
+        apply_shop_purchase(self.ps, cheap, self.weapons, self.caps)
+        again = apply_shop_purchase(self.ps, cheap, self.weapons, self.caps)
+        self.assertFalse(again.ok)
+        self.assertEqual(again.reason, REASON_ALREADY_OWNED)
+
+    def test_insufficient_even_with_credit(self):
+        self.ps.points = 600
+        apply_shop_purchase(self.ps, self.weapons["cheap"], self.weapons, self.caps)
+        self.assertEqual(self.ps.points, 100)
+        # upgrade needs 400 but only 100 left
+        outcome = apply_shop_purchase(self.ps, self.weapons["pricey"], self.weapons, self.caps)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.reason, REASON_INSUFFICIENT)
+        self.assertEqual(outcome.pay, 400)
+        self.assertEqual(self.ps.primary_id, "cheap")
+        self.assertEqual(self.ps.points, 100)
+
+    def test_preset_and_strategy_resolve(self):
+        assign_preset_loadout(
+            self.ps,
+            self.weapons,
+            {"primary": "pricey", "gadgets": ["nade"]},
+        )
+        self.assertEqual(self.ps.primary_id, "pricey")
+        self.assertEqual(self.ps.gadgets, ["nade"])
+        shop = resolve_acquire_strategy(key=ACQUIRE_SHOP)
+        preset = resolve_acquire_strategy({"weapon_acquire": ACQUIRE_PRESET})
+        self.assertTrue(shop.uses_shop)
+        self.assertTrue(isinstance(shop, ShopAcquireStrategy))
+        self.assertFalse(preset.uses_shop)
+        self.assertFalse(preset.uses_buy_phase)
+        self.assertEqual(normalize_acquire_key("nope"), ACQUIRE_SHOP)
+
+    def test_normalize_mode_keeps_weapon_acquire(self):
+        raw = sample_map()
+        raw["modes"][0]["weapon_acquire"] = "preset"
+        raw["modes"][0]["preset_loadout"] = {"primary": "ak47"}
+        normalized = normalize_map(raw)
+        mode = normalized["modes"][0]
+        self.assertEqual(mode["weapon_acquire"], "preset")
+        self.assertEqual(mode["preset_loadout"]["primary"], "ak47")
 
 
 class MapOccupancyTests(unittest.TestCase):
@@ -431,6 +627,34 @@ class MapOccupancyTests(unittest.TestCase):
         lobby_b.set_map_and_mode(map_cfg, "tdm")
         self.assertIn(map_cfg["id"], occupied)
         self.assertEqual(lobby_b.map_id, map_cfg["id"])
+
+
+class CareerKdTitleTests(unittest.TestCase):
+    def test_career_kd(self):
+        from endstone_arc_shooter_game.career_stats import career_kd
+
+        self.assertEqual(career_kd(0, 0), 0.0)
+        self.assertEqual(career_kd(5, 0), 5.0)
+        self.assertEqual(career_kd(10, 5), 2.0)
+        self.assertEqual(career_kd(3, 4), 0.75)
+
+    def test_title_for_kd(self):
+        from endstone_arc_shooter_game.career_stats import title_for_kd, titles_unlocked_by_kd
+
+        self.assertEqual(title_for_kd(5.0), ("神话", "传奇枪王"))
+        self.assertEqual(title_for_kd(3.0), ("传奇", "枪械大师"))
+        self.assertEqual(title_for_kd(2.0), ("史诗", "精英枪手"))
+        self.assertEqual(title_for_kd(1.0), ("稀有", "熟练枪手"))
+        self.assertEqual(title_for_kd(0.9), ("普通", "见习枪手"))
+        unlocked = titles_unlocked_by_kd(2.5)
+        self.assertEqual(
+            unlocked,
+            [
+                ("普通", "见习枪手"),
+                ("稀有", "熟练枪手"),
+                ("史诗", "精英枪手"),
+            ],
+        )
 
 
 if __name__ == "__main__":
