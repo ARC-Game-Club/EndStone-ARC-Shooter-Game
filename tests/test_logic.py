@@ -163,6 +163,17 @@ class ConfigValidateTests(unittest.TestCase):
         assert lobby.map_cfg is not None
         self.assertEqual(lobby.map_cfg.get("match_time_minutes"), 5)
 
+    def test_lobby_rebind_map_refreshes_match_time(self):
+        cfg = sample_map()
+        lobby = Lobby(admin="alice")
+        ok, _ = lobby.set_map_and_mode(cfg, "tdm")
+        self.assertTrue(ok)
+        self.assertEqual(lobby.match_time_minutes, 5)
+        cfg["modes"][0]["match_time_minutes"] = 12
+        ok, _ = lobby.set_map_and_mode(cfg, "tdm")
+        self.assertTrue(ok)
+        self.assertEqual(lobby.match_time_minutes, 12)
+
     def test_weapon_type_and_extras(self):
         errors = validate_weapon(
             {"id": "ak", "item": "custom:ak", "type": "primary", "cost": 10, "extras": {"custom:ammo": 30}}
@@ -484,14 +495,19 @@ class LobbyTests(unittest.TestCase):
         self.assertEqual(win_money, int(round(4000 * (12.5 / 12.0))))
         # 死亡为 0 时按 1 除
         self.assertAlmostEqual(match_reward_coefficient(5, 0, 0, 0), 5.0)
-        from endstone_arc_shooter_game.config import match_mvp_score, pick_team_mvp
+        from endstone_arc_shooter_game.config import match_kda, match_mvp_score, pick_team_mvp
         from endstone_arc_shooter_game.session import PlayerState, TEAM_A
 
         self.assertAlmostEqual(match_mvp_score(10, 12, 5, 0), 12.5 / 12.0 + 1.0, places=5)
+        self.assertAlmostEqual(match_kda(10, 12, 5, 0), 12.5 / 12.0, places=5)
         a = PlayerState(name="a", team=TEAM_A, points=0, kills=10, deaths=12, assists=5)
         b = PlayerState(name="b", team=TEAM_A, points=0, kills=8, deaths=2, assists=0)
-        # b: coeff=8/2=4 + 0.8 = 4.8 > a ≈ 2.04
+        # b: KDA=4 > 1 且 ≥ 队内平均；a: KDA≈1.04 未 > 1
         self.assertEqual(pick_team_mvp([a, b]).name, "b")
+        # 全员 KDA ≤ 1 → 无 MVP
+        low_a = PlayerState(name="low_a", team=TEAM_A, points=0, kills=1, deaths=1, assists=0)
+        low_b = PlayerState(name="low_b", team=TEAM_A, points=0, kills=2, deaths=2, assists=0)
+        self.assertIsNone(pick_team_mvp([low_a, low_b]))
         assists, tks = collect_assist_and_tk(
             {"alice": 10.0, "bob": 9.5, "carol": 1.0, "dave": 9.8},
             now=10.0,
@@ -752,6 +768,17 @@ class CareerKdTitleTests(unittest.TestCase):
         self.assertEqual(career_kd(10, 5), 2.0)
         self.assertEqual(career_kd(3, 4), 0.75)
 
+    def test_career_rates(self):
+        from endstone_arc_shooter_game.career_stats import CareerStats
+
+        stats = CareerStats(name="p", matches=10, wins=6, mvps=3, kills=40, deaths=20)
+        self.assertAlmostEqual(stats.win_rate, 60.0)
+        self.assertAlmostEqual(stats.mvp_rate, 30.0)
+        self.assertAlmostEqual(stats.kd, 2.0)
+        empty = CareerStats(name="new")
+        self.assertEqual(empty.win_rate, 0.0)
+        self.assertEqual(empty.mvp_rate, 0.0)
+
     def test_title_for_kd(self):
         from endstone_arc_shooter_game.career_stats import title_for_kd, titles_unlocked_by_kd
 
@@ -827,18 +854,22 @@ class ArmoryLevelTests(unittest.TestCase):
 
     def test_settlement_xp(self):
         from endstone_arc_shooter_game.career_stats import calc_match_settlement_xp
+        from endstone_arc_shooter_game.config import xp_assist_for_team, xp_kill_for_team
 
-        # 10 kill * 5 = 50 base; win +20% = 10; MVP = 2人×10 = 20
+        self.assertEqual(xp_kill_for_team(1), 2)
+        self.assertEqual(xp_kill_for_team(2), 4)
+        self.assertEqual(xp_assist_for_team(2), 2)
+        # 10 kill × (2人×2)=40 base; win +20% = 8; MVP = 2人×10 = 20
         self.assertEqual(
             calc_match_settlement_xp(10, won=True, mvp=True, team_size=2),
-            10 + 20,
+            8 + 20,
         )
         self.assertEqual(
             calc_match_settlement_xp(10, won=False, mvp=True, team_size=2),
             20,
         )
-        self.assertEqual(calc_match_settlement_xp(10, won=True, mvp=False, team_size=2), 10)
-        # 单人队 MVP 仅 +10，避免一人刷经验过快
+        self.assertEqual(calc_match_settlement_xp(10, won=True, mvp=False, team_size=2), 8)
+        # 单人队 MVP 仅 +10
         self.assertEqual(
             calc_match_settlement_xp(0, won=True, mvp=True, team_size=1),
             10,

@@ -68,6 +68,7 @@ DEFAULT_SETTINGS = {
     "MATCH_ASSIST_WEIGHT": "0.5",
     "MATCH_TK_WEIGHT": "1.5",
     "XP_PER_KILL": "5",
+    "XP_KILL_PER_TEAMMATE": "2",
     "XP_PER_LEVEL": "100",
     "MAX_LEVEL": "100",
     "XP_WIN_BONUS_PERCENT": "20",
@@ -802,6 +803,60 @@ def calc_match_money(
         return 0
 
 
+def match_kda(
+    kills: int,
+    deaths: int,
+    assists: int = 0,
+    team_kills: int = 0,
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> float:
+    """本场 KDA：(K + A×assist_weight − TK×tk_weight) / max(D, 1)。"""
+    return match_reward_coefficient(
+        kills,
+        deaths,
+        assists,
+        team_kills,
+        assist_weight=assist_weight,
+        tk_weight=tk_weight,
+    )
+
+
+def team_average_match_kda(
+    players: List[Any],
+    *,
+    assist_weight: float = 0.5,
+    tk_weight: float = 1.5,
+) -> float:
+    if not players:
+        return 0.0
+    total = 0.0
+    for ps in players:
+        try:
+            total += match_kda(
+                int(getattr(ps, "kills", 0) or 0),
+                int(getattr(ps, "deaths", 0) or 0),
+                int(getattr(ps, "assists", 0) or 0),
+                int(getattr(ps, "team_kills", 0) or 0),
+                assist_weight=assist_weight,
+                tk_weight=tk_weight,
+            )
+        except (TypeError, ValueError):
+            continue
+    return total / float(len(players))
+
+
+def xp_kill_for_team(team_size: int, *, per_teammate: int = 2) -> int:
+    """击杀 XP = 队伍人数 × per_teammate（默认 ×2）。"""
+    return max(1, int(team_size)) * max(0, int(per_teammate))
+
+
+def xp_assist_for_team(team_size: int, *, per_teammate: int = 2) -> int:
+    """助攻 XP = 击杀 XP 的一半。"""
+    return max(0, xp_kill_for_team(team_size, per_teammate=per_teammate) // 2)
+
+
 def match_mvp_score(
     kills: int,
     deaths: int,
@@ -832,10 +887,15 @@ def pick_team_mvp(
     assist_weight: float = 0.5,
     tk_weight: float = 1.5,
 ) -> Optional[Any]:
-    """从队伍成员中选出 MVP（同分优先击杀、助攻、名字）。"""
+    """队内 MVP：KDA > 1 且 KDA ≥ 队伍平均，取 KDA 最高者。"""
+    if not players:
+        return None
+    avg = team_average_match_kda(
+        players, assist_weight=assist_weight, tk_weight=tk_weight
+    )
     best = None
     best_key: Optional[Tuple[float, int, int, str]] = None
-    for ps in players or []:
+    for ps in players:
         try:
             kills = int(getattr(ps, "kills", 0) or 0)
             deaths = int(getattr(ps, "deaths", 0) or 0)
@@ -844,7 +904,7 @@ def pick_team_mvp(
             name = str(getattr(ps, "name", "") or "")
         except (TypeError, ValueError):
             continue
-        score = match_mvp_score(
+        kda = match_kda(
             kills,
             deaths,
             assists,
@@ -852,7 +912,11 @@ def pick_team_mvp(
             assist_weight=assist_weight,
             tk_weight=tk_weight,
         )
-        key = (score, kills, assists, name)
+        if kda <= 1.0:
+            continue
+        if kda + 1e-9 < avg:
+            continue
+        key = (kda, kills, assists, name)
         if best_key is None or key > best_key:
             best_key = key
             best = ps
@@ -1213,7 +1277,17 @@ class ConfigStore:
         return max(0.0, self.settings.GetSettingFloat("MATCH_TK_WEIGHT", 1.5))
 
     def xp_per_kill(self) -> int:
+        """已弃用：请用 xp_kill_for_team(team_size)。"""
         return max(0, self.settings.GetSettingInt("XP_PER_KILL", 5))
+
+    def xp_kill_per_teammate(self) -> int:
+        return max(0, self.settings.GetSettingInt("XP_KILL_PER_TEAMMATE", 2))
+
+    def xp_kill_for_team(self, team_size: int) -> int:
+        return xp_kill_for_team(team_size, per_teammate=self.xp_kill_per_teammate())
+
+    def xp_assist_for_team(self, team_size: int) -> int:
+        return xp_assist_for_team(team_size, per_teammate=self.xp_kill_per_teammate())
 
     def xp_per_level(self) -> int:
         return max(1, self.settings.GetSettingInt("XP_PER_LEVEL", 100))

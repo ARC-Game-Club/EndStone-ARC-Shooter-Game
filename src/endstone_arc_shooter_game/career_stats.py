@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from endstone_arc_shooter_game.config import xp_kill_for_team
 from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 # (最低 KD, 稀有度, 头衔名)
@@ -93,13 +94,18 @@ def calc_match_settlement_xp(
     *,
     won: bool,
     mvp: bool,
-    xp_per_kill: int = 5,
+    team_size: int = 1,
+    xp_kill_per_teammate: int = 2,
     win_bonus_percent: int = 20,
     mvp_per_teammate: int = 10,
-    team_size: int = 1,
+    xp_per_kill: Optional[int] = None,
 ) -> int:
     """结算补发：胜方对「击杀基础 XP」的加成 + MVP（队伍人数 × 单价）。击杀当场 XP 另计。"""
-    base = max(0, int(kills)) * max(0, int(xp_per_kill))
+    if xp_per_kill is not None:
+        per_kill = max(0, int(xp_per_kill))
+    else:
+        per_kill = xp_kill_for_team(team_size, per_teammate=xp_kill_per_teammate)
+    base = max(0, int(kills)) * per_kill
     bonus = 0
     if won and base > 0 and win_bonus_percent > 0:
         bonus += int(math.floor(base * (max(0, int(win_bonus_percent)) / 100.0)))
@@ -128,6 +134,20 @@ class CareerStats:
     @property
     def kd(self) -> float:
         return career_kd(self.kills, self.deaths)
+
+    @property
+    def win_rate(self) -> float:
+        matches = max(0, int(self.matches))
+        if matches <= 0:
+            return 0.0
+        return float(max(0, int(self.wins))) / float(matches) * 100.0
+
+    @property
+    def mvp_rate(self) -> float:
+        matches = max(0, int(self.matches))
+        if matches <= 0:
+            return 0.0
+        return float(max(0, int(self.mvps))) / float(matches) * 100.0
 
     @property
     def title_rarity(self) -> str:

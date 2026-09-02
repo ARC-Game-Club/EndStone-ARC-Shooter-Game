@@ -452,6 +452,9 @@ class ARCShooterGamePlugin(Plugin):
                 self.config_store.reload()
                 lang = self.config_store.settings.GetSetting("DEFAULT_LANGUAGE_CODE") or "ZH-CN"
                 self.language_manager = LanguageManager(lang)
+                for lobby in list(self.lobbies.values()):
+                    if lobby.state == STATE_LOBBY:
+                        self._sync_lobby_map_cfg_from_store(lobby)
                 sender.send_message(self._t("RELOAD_OK"))
             except Exception as e:
                 sender.send_message(self._t("RELOAD_FAIL").format(e))
@@ -1401,6 +1404,12 @@ class ARCShooterGamePlugin(Plugin):
             return owned[0]
         return None
 
+    def _lobby_team_size(self, lobby: Lobby, team_id: str) -> int:
+        count = sum(
+            1 for ps in lobby.players.values() if ps.team == team_id and ps.still_in
+        )
+        return max(1, count)
+
     def _record_career_death(self, name: str) -> None:
         if self.career_store is None:
             return
@@ -1429,7 +1438,13 @@ class ARCShooterGamePlugin(Plugin):
             self.career_store.record_death(victim_name, xuid=self._player_xuid(victim))
             xp_gain = 0
             if self.config_store is not None:
-                xp_gain = self.config_store.xp_per_kill()
+                lobby = self._lobby_of(killer_name)
+                team_size = 1
+                if lobby is not None:
+                    killer_ps = lobby.players.get(killer_name)
+                    if killer_ps is not None:
+                        team_size = self._lobby_team_size(lobby, killer_ps.team)
+                xp_gain = self.config_store.xp_kill_for_team(team_size)
             stats = self.career_store.record_kill(
                 killer_name,
                 weapon_id=weapon_id,
@@ -1462,10 +1477,10 @@ class ARCShooterGamePlugin(Plugin):
                 kills,
                 won=won and not draw,
                 mvp=mvp,
-                xp_per_kill=self.config_store.xp_per_kill(),
+                team_size=team_size,
+                xp_kill_per_teammate=self.config_store.xp_kill_per_teammate(),
                 win_bonus_percent=self.config_store.xp_win_bonus_percent(),
                 mvp_per_teammate=self.config_store.xp_mvp_per_teammate(),
-                team_size=team_size,
             )
         try:
             stats = self.career_store.record_match_end(
@@ -1644,6 +1659,21 @@ class ARCShooterGamePlugin(Plugin):
             helper = self._get_player(name)
             if helper is not None:
                 helper.send_message(self._t("ASSIST_CREDIT").format(victim_name))
+            if self.career_store is not None and self.config_store is not None:
+                team_id = team_of.get(name, "")
+                team_size = self._lobby_team_size(lobby, team_id) if team_id else 1
+                xp_gain = self.config_store.xp_assist_for_team(team_size)
+                if xp_gain > 0:
+                    try:
+                        self.career_store.add_xp(
+                            name, xp_gain, xuid=self._player_xuid(helper)
+                        )
+                        if helper is not None:
+                            helper.send_message(self._t("XP_ASSIST_GAIN").format(xp_gain))
+                    except Exception as e:
+                        self._safe_log(
+                            "warning", f"[ARCShooterGame] assist xp for {name}: {e}"
+                        )
         for name in tks:
             lobby.apply_team_kill_credit(name)
         # 击杀者本人的友军击杀已在 apply_player_kill 计入 team_kills
@@ -2268,11 +2298,51 @@ class ARCShooterGamePlugin(Plugin):
             return self._t("LOBBY_STATUS_BUYING")
         return self._t("LOBBY_STATUS_PLAYING")
 
-    def _lobby_remaining_text(self, lobby: Lobby) -> str:
+    def _lobby_dissolve_countdown_text(self, lobby: Lobby) -> str:
+        """大厅未开局自动解散的倒计时（与比赛时长无关）。"""
         timeout = self.config_store.lobby_timeout() if self.config_store else 900
         remain = max(0, int(timeout - (time.time() - lobby.lobby_started_at)))
         minutes, seconds = divmod(remain, 60)
         return f"{minutes:02d}:{seconds:02d}"
+
+    def _sync_lobby_map_cfg_from_store(self, lobby: Lobby) -> None:
+        """等待中的大厅从配置库刷新地图规则，避免 OP 改时长后界面仍显示旧值。"""
+        if self.config_store is None or lobby.state != STATE_LOBBY:
+            return
+        if not lobby.map_id or not lobby.mode:
+            return
+        map_cfg = self.config_store.maps.get(lobby.map_id)
+        if map_cfg is None:
+            return
+        lobby.set_map_and_mode(map_cfg, lobby.mode)
+
+    def _sync_lobbies_for_map(self, map_id: str) -> None:
+        for lobby in list(self.lobbies.values()):
+            if lobby.map_id == map_id and lobby.state == STATE_LOBBY:
+                self._sync_lobby_map_cfg_from_store(lobby)
+                self._refresh_lobby_menus(lobby)
+
+    def _lobby_rules_block(self, lobby: Lobby) -> str:
+        self._sync_lobby_map_cfg_from_store(lobby)
+        if lobby.map_cfg:
+            target = lobby.target_score
+            match_min = lobby.match_time_minutes
+            team_cap = lobby.max_per_team
+        else:
+            target = match_min = team_cap = "-"
+        lines = [
+            self._t("LOBBY_LINE_MAP").format(self._lobby_map_label(lobby)),
+            self._t("LOBBY_LINE_MODE").format(self._lobby_mode_label(lobby)),
+            self._t("LOBBY_LINE_ADMIN").format(lobby.admin or "-"),
+            self._t("LOBBY_LINE_LOBBY_TIMEOUT").format(self._lobby_dissolve_countdown_text(lobby)),
+            self._t("LOBBY_LINE_TARGET").format(target),
+            self._t("LOBBY_LINE_MATCH_TIME").format(match_min),
+            self._t("LOBBY_LINE_TEAM_CAP").format(team_cap),
+            "",
+            self._team_block(lobby, TEAM_A),
+            self._team_block(lobby, TEAM_B),
+        ]
+        return "\n".join(lines)
 
     def _team_block(self, lobby: Lobby, team_id: str) -> str:
         names = [p.name for p in lobby.online_players() if p.team == team_id]
@@ -2708,8 +2778,13 @@ class ARCShooterGamePlugin(Plugin):
         else:
             level_line = self._t("PROFILE_LINE_LEVEL").format(level, into, per)
         lines = [
+            self._t("PROFILE_LINE_WIN_RATE").format(f"{stats.win_rate:.1f}"),
+            self._t("PROFILE_LINE_MVP_RATE").format(f"{stats.mvp_rate:.1f}"),
+            self._t("PROFILE_LINE_KD_ONLY").format(f"{stats.kd:.2f}"),
+            self._t("PROFILE_LINE_KILLS").format(stats.kills),
+            "",
             level_line,
-            self._t("PROFILE_LINE_KD").format(stats.kills, stats.deaths, f"{stats.kd:.2f}"),
+            self._t("PROFILE_LINE_DEATHS").format(stats.deaths),
             self._t("PROFILE_LINE_MATCHES").format(
                 stats.matches, stats.wins, stats.losses, stats.draws
             ),
@@ -2783,17 +2858,7 @@ class ARCShooterGamePlugin(Plugin):
                 + "\n\n"
                 + self._lobby_hint_text(lobby)
                 + "\n\n"
-                + self._t("LOBBY_CONTENT").format(
-                    self._lobby_map_label(lobby),
-                    self._lobby_mode_label(lobby),
-                    lobby.admin or "-",
-                    self._lobby_remaining_text(lobby),
-                    lobby.target_score if lobby.map_cfg else "-",
-                    lobby.match_time_minutes if lobby.map_cfg else "-",
-                    lobby.max_per_team if lobby.map_cfg else "-",
-                    self._team_block(lobby, TEAM_A),
-                    self._team_block(lobby, TEAM_B),
-                )
+                + self._lobby_rules_block(lobby)
             )
             form = ActionForm(title=self._t("LOBBY_TITLE"), content=content)
             is_admin = lobby.admin == player.name
@@ -3902,6 +3967,7 @@ class ARCShooterGamePlugin(Plugin):
 
             self.config_store.update_map(map_id, updater)
             p.send_message(self._t("MODE_SETTINGS_OK"))
+            self._sync_lobbies_for_map(map_id)
             self._show_mode_edit(p, map_id, mode)
 
         form = ModalForm(
