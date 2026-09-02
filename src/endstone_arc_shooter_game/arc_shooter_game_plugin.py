@@ -406,6 +406,32 @@ class ARCShooterGamePlugin(Plugin):
                 return player
         return None
 
+    def _player_name(self, player: Player) -> Optional[str]:
+        try:
+            name = str(getattr(player, "name", "") or "").strip()
+            return name or None
+        except RuntimeError:
+            return None
+        except Exception:
+            return None
+
+    def _is_valid_player(self, player: Player) -> bool:
+        name = self._player_name(player)
+        if not name:
+            return False
+        live = self._get_player(name)
+        if live is None:
+            return False
+        try:
+            iv = getattr(live, "is_valid", None)
+            if callable(iv):
+                return bool(iv())
+        except RuntimeError:
+            return False
+        except Exception:
+            pass
+        return True
+
     def _is_op(self, sender: CommandSender) -> bool:
         if not isinstance(sender, Player):
             return True
@@ -461,7 +487,7 @@ class ARCShooterGamePlugin(Plugin):
         lobby = self._lobby_of(player.name)
         if lobby is not None:
             if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
-                self._leave_lobby(player, lobby)
+                self._leave_lobby(player, lobby, schedule_menu=False)
             elif lobby.state in (STATE_BUYING, STATE_PLAYING):
                 self._leave_match(player, lobby)
         if player.name in self._pending_restore:
@@ -587,23 +613,27 @@ class ARCShooterGamePlugin(Plugin):
     def on_player_respawn(self, event: PlayerRespawnEvent):
         player = event.player
         if player.name in self._pending_restore:
-            try:
-                self.server.scheduler.run_task(
-                    self, lambda p=player: self._restore_player(p, force=True), delay=1
-                )
-            except Exception:
-                self._restore_player(player, force=True)
+            name = self._player_name(player)
+            if name:
+                try:
+                    self.server.scheduler.run_task(
+                        self, lambda n=name: self._restore_player_by_name(n, force=True), delay=1
+                    )
+                except Exception:
+                    if self._is_valid_player(player):
+                        self._restore_player(player, force=True)
             return
         lobby = self._lobby_of(player.name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             return
+        name = self._player_name(player)
+        if not name:
+            return
+        lobby_id = lobby.lobby_id
         try:
             self.server.scheduler.run_task(
                 self,
-                lambda p=player, lb=lobby: (
-                    self._respawn_in_match(p, lb),
-                    self._apply_team_name_tag(p, lb),
-                ),
+                lambda n=name, lid=lobby_id: self._respawn_in_match_by_name(n, lid),
                 delay=1,
             )
         except Exception:
@@ -822,14 +852,15 @@ class ARCShooterGamePlugin(Plugin):
                 fade_out=5,
             )
 
-    def _leave_lobby(self, player: Player, lobby: Lobby) -> None:
+    def _leave_lobby(self, player: Player, lobby: Lobby, *, schedule_menu: bool = True) -> None:
         leaver_name = player.name
         was_countdown = lobby.state == STATE_COUNTDOWN
         new_admin = lobby.leave(leaver_name)
         self.player_to_lobby.pop(leaver_name, None)
         self._restore_name_tag(player)
         player.send_message(self._t("LEAVE_OK"))
-        self._schedule_root_menu(player)
+        if schedule_menu:
+            self._schedule_root_menu(player)
         if lobby.player_count() == 0:
             self.lobbies.pop(lobby.lobby_id, None)
             return
@@ -1115,14 +1146,18 @@ class ARCShooterGamePlugin(Plugin):
             strategy.assign_on_respawn(ps, weapons, lobby.map_cfg or {})
         self._restore_player_loadout(player, lobby, gadgets=True)
         if ps is not None:
-            try:
-                self.server.scheduler.run_task(
-                    self,
-                    lambda p=player, s=ps: self._apply_owned_weapon_ammo(p, s),
-                    delay=3,
-                )
-            except Exception:
-                self._apply_owned_weapon_ammo(player, ps)
+            name = self._player_name(player)
+            lobby_id = lobby.lobby_id
+            if name:
+                try:
+                    self.server.scheduler.run_task(
+                        self,
+                        lambda n=name, lid=lobby_id: self._apply_owned_weapon_ammo_by_name(n, lid),
+                        delay=3,
+                    )
+                except Exception:
+                    if self._is_valid_player(player):
+                        self._apply_owned_weapon_ammo(player, ps)
         try:
             if hasattr(player, "health"):
                 player.health = getattr(player, "max_health", 20) or 20
@@ -1133,6 +1168,28 @@ class ARCShooterGamePlugin(Plugin):
             self._apply_spawn_protect(player)
         elif lobby.state == STATE_BUYING:
             self._set_buy_freeze(player)
+
+    def _respawn_in_match_by_name(self, player_name: str, lobby_id: str) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        lobby = self.lobbies.get(lobby_id)
+        if lobby is None:
+            return
+        self._respawn_in_match(player, lobby)
+        self._apply_team_name_tag(player, lobby)
+
+    def _apply_owned_weapon_ammo_by_name(self, player_name: str, lobby_id: str) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        lobby = self.lobbies.get(lobby_id)
+        if lobby is None:
+            return
+        ps = lobby.players.get(player_name)
+        if ps is None:
+            return
+        self._apply_owned_weapon_ammo(player, ps)
 
     def _give_arc_coin(self, player: Player) -> None:
         remove_item_count(player, ARC_COIN_ITEM, 64)
@@ -1204,24 +1261,33 @@ class ARCShooterGamePlugin(Plugin):
         return True
 
     def _schedule_lobby_menu(self, player: Player, lobby: Lobby, delay: int = 5) -> None:
+        name = self._player_name(player)
+        if not name:
+            return
+        lobby_id = lobby.lobby_id
         try:
             self.server.scheduler.run_task(
                 self,
-                lambda p=player, lb=lobby: self._show_lobby_menu(p, lb),
+                lambda n=name, lid=lobby_id: self._show_lobby_menu_by_name(n, lid),
                 delay=delay,
             )
         except Exception:
-            self._show_lobby_menu(player, lobby)
+            if self._is_valid_player(player):
+                self._show_lobby_menu(player, lobby)
 
     def _schedule_root_menu(self, player: Player, delay: int = 5) -> None:
+        name = self._player_name(player)
+        if not name:
+            return
         try:
             self.server.scheduler.run_task(
                 self,
-                lambda p=player: self._show_root_menu(p),
+                lambda n=name: self._show_root_menu_by_name(n),
                 delay=delay,
             )
         except Exception:
-            self._show_root_menu(player)
+            if self._is_valid_player(player):
+                self._show_root_menu(player)
 
     def _set_weapon_ammo(self, player_name: str, weapon: Dict[str, Any]) -> None:
         objective = str(weapon.get("ammo_scoreboard") or "").strip()
@@ -1866,14 +1932,18 @@ class ARCShooterGamePlugin(Plugin):
                     player.send_message(line)
 
     def _schedule_match_result_form(self, player: Player, content: str, delay: int = 5) -> None:
+        name = self._player_name(player)
+        if not name:
+            return
         try:
             self.server.scheduler.run_task(
                 self,
-                lambda p=player, c=content: self._show_match_result_form(p, c),
+                lambda n=name, c=content: self._show_match_result_form_by_name(n, c),
                 delay=delay,
             )
         except Exception:
-            self._show_match_result_form(player, content)
+            if self._is_valid_player(player):
+                self._show_match_result_form(player, content)
 
     def _is_probably_dead(self, player: Player) -> bool:
         if bool(getattr(player, "is_dead", False)):
@@ -1885,6 +1955,12 @@ class ARCShooterGamePlugin(Plugin):
         except (TypeError, ValueError):
             pass
         return False
+
+    def _restore_player_by_name(self, player_name: str, *, force: bool = False, after_match: bool = False) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        self._restore_player(player, force=force, after_match=after_match)
 
     def _restore_player(self, player: Player, force: bool = False, after_match: bool = False) -> None:
         if not force and self._is_probably_dead(player):
@@ -2403,14 +2479,18 @@ class ARCShooterGamePlugin(Plugin):
         clear_armor(player)
         self._restore_player_loadout(player, lobby, gadgets=True)
         self._give_arc_coin(player)
-        try:
-            self.server.scheduler.run_task(
-                self,
-                lambda p=player, s=ps: self._apply_owned_weapon_ammo(p, s),
-                delay=3,
-            )
-        except Exception:
-            self._apply_owned_weapon_ammo(player, ps)
+        name = self._player_name(player)
+        lobby_id = lobby.lobby_id
+        if name:
+            try:
+                self.server.scheduler.run_task(
+                    self,
+                    lambda n=name, lid=lobby_id: self._apply_owned_weapon_ammo_by_name(n, lid),
+                    delay=3,
+                )
+            except Exception:
+                if self._is_valid_player(player):
+                    self._apply_owned_weapon_ammo(player, ps)
 
     def _apply_purchase_items(
         self,
@@ -2519,7 +2599,30 @@ class ARCShooterGamePlugin(Plugin):
 
     # ---------- ui ----------
 
+    def _show_root_menu_by_name(self, player_name: str) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        self._show_root_menu(player)
+
+    def _show_lobby_menu_by_name(self, player_name: str, lobby_id: str) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        lobby = self.lobbies.get(lobby_id)
+        if lobby is None:
+            return
+        self._show_lobby_menu(player, lobby)
+
+    def _show_match_result_form_by_name(self, player_name: str, content: str) -> None:
+        player = self._get_player(player_name)
+        if player is None:
+            return
+        self._show_match_result_form(player, content)
+
     def _show_root_menu(self, player: Player) -> None:
+        if not self._is_valid_player(player):
+            return
         lobby = self._lobby_of(player.name)
         if lobby is not None:
             if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
