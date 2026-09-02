@@ -22,13 +22,16 @@ from endstone_arc_shooter_game.config import (
     validate_weapon,
 )
 from endstone_arc_shooter_game.loadout import (
+    ACQUIRE_ARMORY,
     ACQUIRE_PRESET,
     ACQUIRE_SHOP,
     REASON_ALREADY_OWNED,
     REASON_INSUFFICIENT,
     SlotCapacities,
+    ArmoryAcquireStrategy,
     ShopAcquireStrategy,
     apply_shop_purchase,
+    assign_default_loadout,
     assign_preset_loadout,
     normalize_acquire_key,
     quote_shop_purchase,
@@ -78,11 +81,12 @@ def sample_map():
 
 class SlotLayoutTests(unittest.TestCase):
     def test_default_hotbar_layout(self):
-        layout = slot_layout(1, 1, 3)
+        layout = slot_layout(1, 1, 1, 3)
         self.assertEqual(slot_range(layout, "primary"), (0, 1))
         self.assertEqual(slot_range(layout, "secondary"), (1, 2))
-        self.assertEqual(slot_range(layout, "gadget"), (2, 5))
-        self.assertEqual(layout["reserved"], 5)
+        self.assertEqual(slot_range(layout, "melee"), (2, 3))
+        self.assertEqual(slot_range(layout, "gadget"), (3, 6))
+        self.assertEqual(layout["reserved"], 6)
 
 
 class ConfigValidateTests(unittest.TestCase):
@@ -173,9 +177,9 @@ class ConfigValidateTests(unittest.TestCase):
         weapon = normalize_weapon(
             {
                 "id": "ak47",
-                "item": "trenbankai:ak47",
+                "item": "arc:ak47",
                 "type": "primary",
-                "cost": 900,
+                "cost": 800,
                 "default_ammo": 30,
             }
         )
@@ -552,7 +556,7 @@ class ShopLoadoutTests(unittest.TestCase):
                 "type": "gadget",
             },
         }
-        self.caps = SlotCapacities(primary=1, secondary=1, gadget=2, armor=1)
+        self.caps = SlotCapacities(primary=1, secondary=1, melee=1, gadget=2, armor=1)
         self.ps = PlayerState(name="p1", team=TEAM_A, points=1000)
 
     def test_upgrade_pays_difference(self):
@@ -591,6 +595,99 @@ class ShopLoadoutTests(unittest.TestCase):
         self.assertEqual(self.ps.primary_id, "cheap")
         self.assertEqual(self.ps.points, 100)
 
+    def test_downgrade_refunds_difference(self):
+        mid = {
+            "id": "mid",
+            "display_name": "中价枪",
+            "item": "minecraft:iron_sword",
+            "cost": 700,
+            "type": "primary",
+        }
+        weapons = {**self.weapons, "mid": mid}
+        apply_shop_purchase(self.ps, self.weapons["cheap"], weapons, self.caps)
+        apply_shop_purchase(self.ps, self.weapons["pricey"], weapons, self.caps)
+        self.assertEqual(self.ps.primary_id, "pricey")
+        self.assertEqual(self.ps.points, 100)
+        # 降级退差价 200，点数回到 300
+        downgrade = apply_shop_purchase(self.ps, mid, weapons, self.caps)
+        self.assertTrue(downgrade.ok)
+        self.assertEqual(downgrade.pay, -200)
+        self.assertEqual(downgrade.credit, 900)
+        self.assertEqual(self.ps.primary_id, "mid")
+        self.assertEqual(self.ps.points, 300)
+        # 再换回贵枪只需补 200
+        quote = quote_shop_purchase(self.ps, self.weapons["pricey"], weapons, self.caps)
+        self.assertEqual(quote.pay, 200)
+        self.assertEqual(quote.credit, 700)
+        self.assertTrue(quote.is_upgrade)
+        swap_back = apply_shop_purchase(self.ps, self.weapons["pricey"], weapons, self.caps)
+        self.assertTrue(swap_back.ok)
+        self.assertEqual(swap_back.pay, 200)
+        self.assertEqual(self.ps.primary_id, "pricey")
+        self.assertEqual(self.ps.points, 100)
+
+    def test_assign_default_loadout(self):
+        weapons = {
+            **self.weapons,
+            "m1911": {
+                "id": "m1911",
+                "display_name": "M1911",
+                "item": "arc:m1911",
+                "cost": 250,
+                "type": "secondary",
+            },
+            "knife": {
+                "id": "knife",
+                "display_name": "战术匕首",
+                "item": "arc:silencefd",
+                "cost": 100,
+                "type": "melee",
+            },
+        }
+        defaults = {
+            "primary": "",
+            "secondary": "m1911",
+            "melee": "knife",
+            "gadget": "",
+            "armor": "",
+        }
+        assign_default_loadout(self.ps, weapons, defaults)
+        self.assertIsNone(self.ps.primary_id)
+        self.assertEqual(self.ps.secondary_id, "m1911")
+        self.assertEqual(self.ps.melee_id, "knife")
+        self.assertIsNone(self.ps.armor_id)
+        self.assertEqual(self.ps.gadgets, [])
+
+    def test_default_weapon_has_no_trade_in_credit(self):
+        weapons = {
+            **self.weapons,
+            "m1911": {
+                "id": "m1911",
+                "display_name": "M1911",
+                "item": "arc:m1911",
+                "cost": 250,
+                "type": "secondary",
+            },
+            "glock": {
+                "id": "glock",
+                "display_name": "Glock",
+                "item": "arc:glock17",
+                "cost": 300,
+                "type": "secondary",
+            },
+        }
+        defaults = {"secondary": "m1911"}
+        assign_default_loadout(self.ps, weapons, defaults)
+        quote = quote_shop_purchase(
+            self.ps,
+            weapons["glock"],
+            weapons,
+            self.caps,
+            default_weapons=defaults,
+        )
+        self.assertEqual(quote.pay, 300)
+        self.assertEqual(quote.credit, 0)
+
     def test_preset_and_strategy_resolve(self):
         assign_preset_loadout(
             self.ps,
@@ -605,16 +702,33 @@ class ShopLoadoutTests(unittest.TestCase):
         self.assertTrue(isinstance(shop, ShopAcquireStrategy))
         self.assertFalse(preset.uses_shop)
         self.assertFalse(preset.uses_buy_phase)
-        self.assertEqual(normalize_acquire_key("nope"), ACQUIRE_SHOP)
+        self.assertEqual(normalize_acquire_key("nope"), ACQUIRE_ARMORY)
+        armory = resolve_acquire_strategy(key=ACQUIRE_ARMORY)
+        self.assertTrue(isinstance(armory, ArmoryAcquireStrategy))
+        self.assertFalse(armory.uses_shop)
+        self.assertTrue(armory.uses_buy_phase)
 
     def test_normalize_mode_keeps_weapon_acquire(self):
         raw = sample_map()
-        raw["modes"][0]["weapon_acquire"] = "preset"
-        raw["modes"][0]["preset_loadout"] = {"primary": "ak47"}
+        # TDM 固定军械库，显式写 shop 也会被纠正
+        raw["modes"][0]["weapon_acquire"] = "shop"
         normalized = normalize_map(raw)
-        mode = normalized["modes"][0]
+        self.assertEqual(normalized["modes"][0]["weapon_acquire"], ACQUIRE_ARMORY)
+        # 非 TDM 仍可保留其它获取方式
+        raw2 = sample_map()
+        raw2["modes"][0]["mode"] = "ffa"
+        raw2["modes"][0]["weapon_acquire"] = "preset"
+        raw2["modes"][0]["preset_loadout"] = {"primary": "ak47"}
+        mode = normalize_map(raw2)["modes"][0]
         self.assertEqual(mode["weapon_acquire"], "preset")
         self.assertEqual(mode["preset_loadout"]["primary"], "ak47")
+
+    def test_tdm_defaults_to_armory(self):
+        mode = normalize_map(sample_map())["modes"][0]
+        self.assertEqual(mode["weapon_acquire"], ACQUIRE_ARMORY)
+        forced = sample_map()
+        forced["modes"][0]["weapon_acquire"] = "shop"
+        self.assertEqual(normalize_map(forced)["modes"][0]["weapon_acquire"], ACQUIRE_ARMORY)
 
 
 class MapOccupancyTests(unittest.TestCase):
@@ -655,6 +769,201 @@ class CareerKdTitleTests(unittest.TestCase):
                 ("史诗", "精英枪手"),
             ],
         )
+
+    def test_match_result_counters(self):
+        import tempfile
+        from pathlib import Path
+
+        from endstone_arc_shooter_game.career_stats import CareerStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CareerStore(db_path=Path(tmp) / "t.db")
+            store.record_match_end("p", won=True, mvp=True)
+            store.record_match_end("p", won=False, mvp=True)
+            store.record_match_end("p", draw=True, mvp=True)
+            store.record_match_end("p", won=False, mvp=False)
+            s = store.get("p")
+            self.assertEqual(s.matches, 4)
+            self.assertEqual(s.wins, 1)
+            self.assertEqual(s.losses, 2)
+            self.assertEqual(s.draws, 1)
+            self.assertEqual(s.mvps, 3)
+            self.assertEqual(s.win_mvps, 1)
+            self.assertEqual(s.lose_mvps, 1)
+            store.close()
+
+    def test_list_ranked_by_kd(self):
+        import tempfile
+        from pathlib import Path
+
+        from endstone_arc_shooter_game.career_stats import CareerStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CareerStore(db_path=Path(tmp) / "t.db")
+            store.record_kill("low", xp_gain=0)
+            store.record_death("low")
+            store.record_death("low")
+            for _ in range(4):
+                store.record_kill("high", xp_gain=0)
+            store.record_death("high")
+            store.record_kill("mid", xp_gain=0)
+            ranked = store.list_ranked_by_kd()
+            self.assertEqual([s.name for s in ranked], ["high", "mid", "low"])
+            self.assertGreater(ranked[0].kd, ranked[1].kd)
+            store.close()
+
+
+class ArmoryLevelTests(unittest.TestCase):
+    def test_level_from_xp_and_progress(self):
+        from endstone_arc_shooter_game.career_stats import level_from_xp, xp_progress
+
+        self.assertEqual(level_from_xp(0), 0)
+        self.assertEqual(level_from_xp(99), 0)
+        self.assertEqual(level_from_xp(100), 1)
+        self.assertEqual(level_from_xp(10000), 100)
+        self.assertEqual(level_from_xp(99999), 100)
+        self.assertEqual(xp_progress(250), (2, 50, 100))
+        self.assertEqual(xp_progress(10000), (100, 0, 100))
+
+    def test_settlement_xp(self):
+        from endstone_arc_shooter_game.career_stats import calc_match_settlement_xp
+
+        # 10 kill * 5 = 50 base; win +20% = 10; MVP = 2人×10 = 20
+        self.assertEqual(
+            calc_match_settlement_xp(10, won=True, mvp=True, team_size=2),
+            10 + 20,
+        )
+        self.assertEqual(
+            calc_match_settlement_xp(10, won=False, mvp=True, team_size=2),
+            20,
+        )
+        self.assertEqual(calc_match_settlement_xp(10, won=True, mvp=False, team_size=2), 10)
+        # 单人队 MVP 仅 +10，避免一人刷经验过快
+        self.assertEqual(
+            calc_match_settlement_xp(0, won=True, mvp=True, team_size=1),
+            10,
+        )
+        self.assertEqual(
+            calc_match_settlement_xp(0, won=False, mvp=True, team_size=3, mvp_per_teammate=10),
+            30,
+        )
+
+    def test_sanitize_loadout_fallback(self):
+        from endstone_arc_shooter_game.loadout_store import SavedLoadout, sanitize_loadout
+
+        weapons = {
+            "m4": {"id": "m4", "type": "primary", "unlock_level": 0, "category": "assault_rifle"},
+            "ak47": {"id": "ak47", "type": "primary", "unlock_level": 25, "category": "assault_rifle"},
+            "m1911": {"id": "m1911", "type": "secondary", "unlock_level": 0, "category": "pistol"},
+        }
+        defaults = {"primary": "m4", "secondary": "m1911"}
+        raw = SavedLoadout(name="p", primary_id="ak47", secondary_id="m1911")
+        cleaned = sanitize_loadout(raw, weapons, defaults, level=0)
+        self.assertEqual(cleaned.primary_id, "m4")
+        self.assertEqual(cleaned.secondary_id, "m1911")
+        cleaned2 = sanitize_loadout(raw, weapons, defaults, level=25)
+        self.assertEqual(cleaned2.primary_id, "ak47")
+
+    def test_five_presets_default(self):
+        import tempfile
+        from pathlib import Path
+
+        from endstone_arc_shooter_game.loadout_store import PRESET_COUNT, LoadoutStore
+
+        defaults = {
+            "primary": "m4",
+            "secondary": "m1911",
+            "melee": "silencefd",
+            "gadget": "mk2_grenade",
+            "armor": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LoadoutStore(db_path=Path(tmp) / "l.db")
+            presets = store.list_presets("p", defaults=defaults)
+            self.assertEqual(len(presets), PRESET_COUNT)
+            for i, p in enumerate(presets):
+                self.assertEqual(p.slot, i)
+                self.assertEqual(p.primary_id, "m4")
+                self.assertEqual(p.secondary_id, "m1911")
+                self.assertEqual(p.melee_id, "silencefd")
+                self.assertEqual(p.gadgets, ["mk2_grenade"])
+            store.set_active_slot("p", 2)
+            store.set_slot(
+                "p",
+                "primary",
+                None,
+                preset=2,
+                weapons={"m4": {"id": "m4", "type": "primary", "unlock_level": 0}},
+                level=0,
+                defaults=defaults,
+            )
+            active = store.get("p", defaults=defaults)
+            self.assertEqual(active.slot, 2)
+            self.assertIsNone(active.primary_id)
+            store.close()
+
+    def test_normalize_weapon_category_unlock(self):
+        w = normalize_weapon(
+            {
+                "id": "m4",
+                "display_name": "M4",
+                "item": "arc:m4",
+                "cost": 650,
+                "type": "primary",
+                "category": "assault_rifle",
+                "unlock_level": 0,
+            }
+        )
+        self.assertEqual(w["category"], "assault_rifle")
+        self.assertEqual(w["unlock_level"], 0)
+        errors = validate_weapon(
+            {
+                "id": "x",
+                "display_name": "X",
+                "item": "arc:x",
+                "cost": 1,
+                "type": "primary",
+                "category": "nope",
+                "unlock_level": -1,
+            }
+        )
+        self.assertTrue(any("category" in e for e in errors))
+
+    def test_armory_assign_uses_saved(self):
+        from endstone_arc_shooter_game.loadout_store import SavedLoadout
+
+        weapons = {
+            "m4": {"id": "m4", "type": "primary", "unlock_level": 0},
+            "m1911": {"id": "m1911", "type": "secondary", "unlock_level": 0},
+            "silencefd": {"id": "silencefd", "type": "melee", "unlock_level": 0},
+            "mk2_grenade": {"id": "mk2_grenade", "type": "gadget", "unlock_level": 0},
+        }
+        ps = PlayerState(name="alice", team=TEAM_A, points=0)
+        strategy = ArmoryAcquireStrategy()
+        strategy.assign_on_match_start(
+            ps,
+            weapons,
+            {},
+            defaults={
+                "primary": "m4",
+                "secondary": "m1911",
+                "melee": "silencefd",
+                "gadget": "mk2_grenade",
+            },
+            saved_loadout=SavedLoadout(
+                name="alice",
+                primary_id="m4",
+                secondary_id="m1911",
+                melee_id="silencefd",
+                gadgets=["mk2_grenade"],
+            ),
+            player_level=0,
+            gadget_slots=2,
+        )
+        self.assertEqual(ps.primary_id, "m4")
+        self.assertEqual(ps.secondary_id, "m1911")
+        self.assertEqual(ps.melee_id, "silencefd")
+        self.assertEqual(ps.gadgets, ["mk2_grenade"])
 
 
 if __name__ == "__main__":

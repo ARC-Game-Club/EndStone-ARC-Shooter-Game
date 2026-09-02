@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""武器获取策略：商店（含差价升级）、预设、随机、武器大师等。
+"""武器获取策略：商店（含差价升级/降级退差价）、预设、随机、武器大师等。
 
 纯逻辑，不依赖 Endstone。插件只负责把结果落到背包 / UI。
 """
@@ -14,12 +14,14 @@ from endstone_arc_shooter_game.session import PlayerState, first_empty_or_first
 
 # 模式配置里的 weapon_acquire 取值
 ACQUIRE_SHOP = "shop"
+ACQUIRE_ARMORY = "armory"
 ACQUIRE_PRESET = "preset"
 ACQUIRE_RANDOM = "random"
 ACQUIRE_WEAPON_MASTER = "weapon_master"
 
 KNOWN_ACQUIRE_MODES = (
     ACQUIRE_SHOP,
+    ACQUIRE_ARMORY,
     ACQUIRE_PRESET,
     ACQUIRE_RANDOM,
     ACQUIRE_WEAPON_MASTER,
@@ -37,6 +39,7 @@ REASON_DISABLED = "shop_disabled"
 class SlotCapacities:
     primary: int = 1
     secondary: int = 1
+    melee: int = 1
     gadget: int = 2
     armor: int = 1
 
@@ -51,6 +54,7 @@ class SlotCapacities:
         return cls(
             primary=span("primary", 1),
             secondary=span("secondary", 1),
+            melee=span("melee", 1),
             gadget=span("gadget", 2),
             armor=1,
         )
@@ -71,8 +75,16 @@ class ShopQuote:
     no_slot: bool
 
     @property
-    def is_upgrade(self) -> bool:
+    def is_trade(self) -> bool:
         return self.credit > 0 and not self.already_owned and not self.no_slot
+
+    @property
+    def is_upgrade(self) -> bool:
+        return self.is_trade and self.pay > 0
+
+    @property
+    def is_downgrade(self) -> bool:
+        return self.is_trade and self.pay < 0
 
 
 @dataclass
@@ -97,12 +109,13 @@ class OwnedEntry:
 def clear_owned_loadout(ps: PlayerState) -> None:
     ps.primary_id = None
     ps.secondary_id = None
+    ps.melee_id = None
     ps.armor_id = None
     ps.gadgets = []
 
 
 def owned_weapon_ids(ps: PlayerState) -> Set[str]:
-    return set(filter(None, [ps.primary_id, ps.secondary_id, ps.armor_id, *ps.gadgets]))
+    return set(filter(None, [ps.primary_id, ps.secondary_id, ps.melee_id, ps.armor_id, *ps.gadgets]))
 
 
 def iter_owned_entries(ps: PlayerState) -> List[OwnedEntry]:
@@ -111,6 +124,8 @@ def iter_owned_entries(ps: PlayerState) -> List[OwnedEntry]:
         rows.append(OwnedEntry(ps.primary_id, "primary", 0))
     if ps.secondary_id:
         rows.append(OwnedEntry(ps.secondary_id, "secondary", 0))
+    if ps.melee_id:
+        rows.append(OwnedEntry(ps.melee_id, "melee", 0))
     if ps.armor_id:
         rows.append(OwnedEntry(ps.armor_id, "armor", 0))
     for idx, gid in enumerate(ps.gadgets):
@@ -129,6 +144,8 @@ def trade_in_weapon_id(ps: PlayerState, wtype: str, capacity: int) -> Optional[s
         return ps.primary_id
     if wtype == "secondary":
         return ps.secondary_id
+    if wtype == "melee":
+        return ps.melee_id
     if wtype == "armor":
         return ps.armor_id
     if wtype == "gadget":
@@ -145,16 +162,23 @@ def purchase_pay_amount(
     weapon: Dict[str, Any],
     trade_in_id: Optional[str],
     weapons: Dict[str, Dict[str, Any]],
+    *,
+    wtype: str = "",
+    default_weapons: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, int]:
-    """返回 (实付, 抵扣)。降级不退差价。"""
+    """返回 (实付, 抵扣)。实付可为负，表示降级退差价。默认武器抵扣为 0。"""
     cost = max(0, int(weapon.get("cost") or 0))
     if not trade_in_id or trade_in_id == weapon.get("id"):
+        return cost, 0
+    defaults = default_weapons or {}
+    default_id = str(defaults.get(wtype) or "").strip()
+    if default_id and trade_in_id == default_id:
         return cost, 0
     old = weapons.get(trade_in_id)
     if not old:
         return cost, 0
     credit = max(0, int(old.get("cost") or 0))
-    return max(0, cost - credit), credit
+    return cost - credit, credit
 
 
 def record_owned(
@@ -172,6 +196,10 @@ def record_owned(
     if wtype == "secondary":
         old = ps.secondary_id
         ps.secondary_id = wid
+        return 0, old
+    if wtype == "melee":
+        old = ps.melee_id
+        ps.melee_id = wid
         return 0, old
     if wtype == "armor":
         old = ps.armor_id
@@ -195,6 +223,8 @@ def quote_shop_purchase(
     weapon: Dict[str, Any],
     weapons: Dict[str, Dict[str, Any]],
     capacities: SlotCapacities,
+    *,
+    default_weapons: Optional[Dict[str, str]] = None,
 ) -> ShopQuote:
     wtype = str(weapon.get("type") or "")
     wid = str(weapon.get("id") or "")
@@ -213,7 +243,13 @@ def quote_shop_purchase(
         )
     trade_in = trade_in_weapon_id(ps, wtype, capacity)
     already = trade_in == wid
-    pay, credit = (full_cost, 0) if already else purchase_pay_amount(weapon, trade_in, weapons)
+    pay, credit = (full_cost, 0) if already else purchase_pay_amount(
+        weapon,
+        trade_in,
+        weapons,
+        wtype=wtype,
+        default_weapons=default_weapons,
+    )
     return ShopQuote(
         weapon_id=wid,
         weapon_type=wtype,
@@ -231,6 +267,8 @@ def apply_shop_purchase(
     weapon: Dict[str, Any],
     weapons: Dict[str, Dict[str, Any]],
     capacities: SlotCapacities,
+    *,
+    default_weapons: Optional[Dict[str, str]] = None,
 ) -> ShopPurchaseOutcome:
     wid = str(weapon.get("id") or "")
     if wid not in weapons and weapon.get("id"):
@@ -239,7 +277,13 @@ def apply_shop_purchase(
     if not wid:
         return ShopPurchaseOutcome(ok=False, reason=REASON_UNKNOWN, points_left=ps.points)
 
-    quote = quote_shop_purchase(ps, weapon, weapons, capacities)
+    quote = quote_shop_purchase(
+        ps,
+        weapon,
+        weapons,
+        capacities,
+        default_weapons=default_weapons,
+    )
     if quote.no_slot:
         return ShopPurchaseOutcome(ok=False, reason=REASON_NO_SLOT, weapon=weapon, points_left=ps.points)
     if quote.already_owned:
@@ -252,7 +296,7 @@ def apply_shop_purchase(
             pay=0,
             old_id=quote.trade_in_id,
         )
-    if ps.points < quote.pay:
+    if quote.pay > 0 and ps.points < quote.pay:
         return ShopPurchaseOutcome(
             ok=False,
             reason=REASON_INSUFFICIENT,
@@ -277,6 +321,27 @@ def apply_shop_purchase(
     )
 
 
+def assign_default_loadout(
+    ps: PlayerState,
+    weapons: Dict[str, Dict[str, Any]],
+    defaults: Optional[Dict[str, str]] = None,
+) -> None:
+    """按配置发放免费默认武器（不扣点数）。"""
+    cfg = defaults or {}
+    for wtype, slot_attr in (
+        ("primary", "primary_id"),
+        ("secondary", "secondary_id"),
+        ("melee", "melee_id"),
+        ("armor", "armor_id"),
+    ):
+        wid = str(cfg.get(wtype) or "").strip()
+        if wid and wid in weapons and str(weapons[wid].get("type") or "") == wtype:
+            setattr(ps, slot_attr, wid)
+    gadget_default = str(cfg.get("gadget") or "").strip()
+    if gadget_default and gadget_default in weapons and weapons[gadget_default].get("type") == "gadget":
+        ps.gadgets = [gadget_default]
+
+
 def assign_preset_loadout(
     ps: PlayerState,
     weapons: Dict[str, Dict[str, Any]],
@@ -286,11 +351,14 @@ def assign_preset_loadout(
     clear_owned_loadout(ps)
     primary = str(preset.get("primary") or "").strip()
     secondary = str(preset.get("secondary") or "").strip()
+    melee = str(preset.get("melee") or "").strip()
     armor = str(preset.get("armor") or "").strip()
     if primary and primary in weapons:
         ps.primary_id = primary
     if secondary and secondary in weapons:
         ps.secondary_id = secondary
+    if melee and melee in weapons:
+        ps.melee_id = melee
     if armor and armor in weapons:
         ps.armor_id = armor
     gadgets = preset.get("gadgets") or []
@@ -355,8 +423,12 @@ class WeaponAcquireStrategy(ABC):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        defaults: Optional[Dict[str, str]] = None,
+        saved_loadout: Any = None,
+        player_level: int = 0,
+        gadget_slots: int = 2,
     ) -> None:
-        """开局发放（预设/随机等）。商店模式默认清空后由玩家自购。"""
+        """开局发放（预设/随机/军械库等）。"""
         return
 
     def assign_on_respawn(
@@ -366,8 +438,12 @@ class WeaponAcquireStrategy(ABC):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        defaults: Optional[Dict[str, str]] = None,
+        saved_loadout: Any = None,
+        player_level: int = 0,
+        gadget_slots: int = 2,
     ) -> None:
-        """重生时是否重抽装备。默认保留已有持有记录（由商店补发）。"""
+        """重生时是否重抽装备。默认保留已有持有记录。"""
         return
 
     def quote(
@@ -376,6 +452,8 @@ class WeaponAcquireStrategy(ABC):
         weapon: Dict[str, Any],
         weapons: Dict[str, Dict[str, Any]],
         capacities: SlotCapacities,
+        *,
+        default_weapons: Optional[Dict[str, str]] = None,
     ) -> ShopQuote:
         raise NotImplementedError
 
@@ -385,6 +463,8 @@ class WeaponAcquireStrategy(ABC):
         weapon: Dict[str, Any],
         weapons: Dict[str, Dict[str, Any]],
         capacities: SlotCapacities,
+        *,
+        default_weapons: Optional[Dict[str, str]] = None,
     ) -> ShopPurchaseOutcome:
         return ShopPurchaseOutcome(
             ok=False,
@@ -395,7 +475,7 @@ class WeaponAcquireStrategy(ABC):
 
 
 class ShopAcquireStrategy(WeaponAcquireStrategy):
-    """点数商店：同栏位升级只补差价，重生按持有记录补发。"""
+    """点数商店：同栏位升级补差价、降级退差价，重生按持有记录补发。"""
 
     key = ACQUIRE_SHOP
 
@@ -407,14 +487,36 @@ class ShopAcquireStrategy(WeaponAcquireStrategy):
     def uses_buy_phase(self) -> bool:
         return True
 
+    def assign_on_match_start(
+        self,
+        ps: PlayerState,
+        weapons: Dict[str, Dict[str, Any]],
+        mode_cfg: Optional[Dict[str, Any]] = None,
+        *,
+        rng: Optional[random.Random] = None,
+        defaults: Optional[Dict[str, str]] = None,
+        saved_loadout: Any = None,
+        player_level: int = 0,
+        gadget_slots: int = 2,
+    ) -> None:
+        assign_default_loadout(ps, weapons, defaults)
+
     def quote(
         self,
         ps: PlayerState,
         weapon: Dict[str, Any],
         weapons: Dict[str, Dict[str, Any]],
         capacities: SlotCapacities,
+        *,
+        default_weapons: Optional[Dict[str, str]] = None,
     ) -> ShopQuote:
-        return quote_shop_purchase(ps, weapon, weapons, capacities)
+        return quote_shop_purchase(
+            ps,
+            weapon,
+            weapons,
+            capacities,
+            default_weapons=default_weapons,
+        )
 
     def purchase(
         self,
@@ -422,8 +524,60 @@ class ShopAcquireStrategy(WeaponAcquireStrategy):
         weapon: Dict[str, Any],
         weapons: Dict[str, Dict[str, Any]],
         capacities: SlotCapacities,
+        *,
+        default_weapons: Optional[Dict[str, str]] = None,
     ) -> ShopPurchaseOutcome:
-        return apply_shop_purchase(ps, weapon, weapons, capacities)
+        return apply_shop_purchase(
+            ps,
+            weapon,
+            weapons,
+            capacities,
+            default_weapons=default_weapons,
+        )
+
+
+class ArmoryAcquireStrategy(WeaponAcquireStrategy):
+    """军械库：赛外/开局配置窗换装；无商店，但开局仍有购买/配置阶段（冻结+无敌）。"""
+
+    key = ACQUIRE_ARMORY
+
+    @property
+    def uses_shop(self) -> bool:
+        return False
+
+    @property
+    def uses_buy_phase(self) -> bool:
+        return True
+
+    def assign_on_match_start(
+        self,
+        ps: PlayerState,
+        weapons: Dict[str, Dict[str, Any]],
+        mode_cfg: Optional[Dict[str, Any]] = None,
+        *,
+        rng: Optional[random.Random] = None,
+        defaults: Optional[Dict[str, str]] = None,
+        saved_loadout: Any = None,
+        player_level: int = 0,
+        gadget_slots: int = 2,
+    ) -> None:
+        from endstone_arc_shooter_game.loadout_store import (
+            SavedLoadout,
+            apply_saved_loadout_to_player,
+            sanitize_loadout,
+        )
+
+        defaults = defaults or {}
+        if saved_loadout is None:
+            saved_loadout = SavedLoadout(name=ps.name)
+        cleaned = sanitize_loadout(
+            saved_loadout,
+            weapons,
+            defaults,
+            int(player_level),
+            gadget_slots=int(gadget_slots),
+        )
+        apply_saved_loadout_to_player(ps, cleaned)
 
 
 class PresetAcquireStrategy(WeaponAcquireStrategy):
@@ -446,6 +600,7 @@ class PresetAcquireStrategy(WeaponAcquireStrategy):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        **_kwargs: Any,
     ) -> None:
         preset = (mode_cfg or {}).get("preset_loadout") or {}
         if not isinstance(preset, dict):
@@ -494,6 +649,7 @@ class RandomAcquireStrategy(WeaponAcquireStrategy):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        **_kwargs: Any,
     ) -> None:
         self._roll(ps, weapons, mode_cfg, rng)
 
@@ -504,6 +660,7 @@ class RandomAcquireStrategy(WeaponAcquireStrategy):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        **_kwargs: Any,
     ) -> None:
         if self.reroll_on_respawn:
             self._roll(ps, weapons, mode_cfg, rng)
@@ -529,6 +686,7 @@ class WeaponMasterAcquireStrategy(WeaponAcquireStrategy):
         mode_cfg: Optional[Dict[str, Any]] = None,
         *,
         rng: Optional[random.Random] = None,
+        **_kwargs: Any,
     ) -> None:
         # 占位：先发列表第一把主武器（若配置了 master_weapon_ids）
         clear_owned_loadout(ps)
@@ -545,6 +703,7 @@ class WeaponMasterAcquireStrategy(WeaponAcquireStrategy):
 
 _STRATEGY_CACHE: Dict[str, WeaponAcquireStrategy] = {
     ACQUIRE_SHOP: ShopAcquireStrategy(),
+    ACQUIRE_ARMORY: ArmoryAcquireStrategy(),
     ACQUIRE_PRESET: PresetAcquireStrategy(),
     ACQUIRE_RANDOM: RandomAcquireStrategy(),
     ACQUIRE_WEAPON_MASTER: WeaponMasterAcquireStrategy(),
@@ -552,9 +711,9 @@ _STRATEGY_CACHE: Dict[str, WeaponAcquireStrategy] = {
 
 
 def normalize_acquire_key(raw: Any) -> str:
-    key = str(raw or ACQUIRE_SHOP).strip().lower()
+    key = str(raw or ACQUIRE_ARMORY).strip().lower()
     if key not in KNOWN_ACQUIRE_MODES:
-        return ACQUIRE_SHOP
+        return ACQUIRE_ARMORY
     return key
 
 

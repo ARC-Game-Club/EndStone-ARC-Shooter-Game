@@ -25,7 +25,10 @@ from endstone.plugin import Plugin
 from endstone_arc_shooter_game.career_stats import (
     CareerStore,
     KD_TITLE_TIERS,
+    calc_match_settlement_xp,
+    level_from_xp,
     titles_unlocked_by_kd,
+    xp_progress,
 )
 from endstone_arc_shooter_game.config import (
     IMPLEMENTED_MODES,
@@ -71,6 +74,12 @@ from endstone_arc_shooter_game.loadout import (
     owned_weapon_ids,
     resolve_acquire_strategy,
 )
+from endstone_arc_shooter_game.loadout_store import (
+    PRESET_COUNT,
+    LoadoutStore,
+    sanitize_loadout,
+    weapon_unlocked,
+)
 from endstone_arc_shooter_game.session import (
     STATE_BUYING,
     STATE_COUNTDOWN,
@@ -114,6 +123,7 @@ _VANILLA_CMD_DIM = {
 ARC_COIN_ITEM = "arc:arc_coin"
 ARC_COIN_HOTBAR_SLOT = 8
 SHOP_DEBOUNCE_SECONDS = 0.2
+# 兜底；实际购买/换装无敌窗优先用 settings BUY_TIME_SECONDS
 SPAWN_PROTECT_SECONDS = 3
 MATCH_BUFF_DURATION_SECONDS = 1000000
 # 基岩版玩家默认行走速度；购买期设为 0，开局再恢复
@@ -210,6 +220,7 @@ class ARCShooterGamePlugin(Plugin):
         self.config_store: Optional[ConfigStore] = None
         self.language_manager: Optional[LanguageManager] = None
         self.career_store: Optional[CareerStore] = None
+        self.loadout_store: Optional[LoadoutStore] = None
         self.lobbies: Dict[str, Lobby] = {}
         self.player_to_lobby: Dict[str, str] = {}
         self.backups: Dict[str, Dict[str, Any]] = {}
@@ -220,7 +231,9 @@ class ARCShooterGamePlugin(Plugin):
         self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
         self._spawn_protect_until: Dict[str, float] = {}
+        self._armory_edit_preset: Dict[str, int] = {}
         self._buy_frozen: set[str] = set()
+        self._ff_warn_at: Dict[str, float] = {}
         self._tick_task = None
         self._fast_tick_task = None
 
@@ -248,6 +261,11 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as e:
             self.career_store = None
             self._safe_log("error", f"[ARCShooterGame] career store init failed: {e}")
+        try:
+            self.loadout_store = LoadoutStore(logger=getattr(self, "logger", None))
+        except Exception as e:
+            self.loadout_store = None
+            self._safe_log("error", f"[ARCShooterGame] loadout store init failed: {e}")
         self._safe_log("info", "[ARCShooterGame] on_load")
 
     def on_enable(self) -> None:
@@ -287,6 +305,12 @@ class ARCShooterGamePlugin(Plugin):
             except Exception:
                 pass
             self.career_store = None
+        if self.loadout_store is not None:
+            try:
+                self.loadout_store.close()
+            except Exception:
+                pass
+            self.loadout_store = None
         try:
             self.server.scheduler.cancel_tasks(self)
         except Exception:
@@ -461,6 +485,25 @@ class ARCShooterGamePlugin(Plugin):
             now = time.time()
             self._last_attacker[victim_name] = (killer_name, now)
             self._damage_log.setdefault(victim_name, {})[killer_name] = now
+            if lobby.state == STATE_PLAYING:
+                killer_ps = lobby.players.get(killer_name)
+                victim_ps = lobby.players.get(victim_name)
+                if (
+                    killer_ps is not None
+                    and victim_ps is not None
+                    and killer_ps.team == victim_ps.team
+                ):
+                    self._warn_friendly_fire(killer_name, now)
+
+    def _warn_friendly_fire(self, attacker_name: str, now: float) -> None:
+        last = float(self._ff_warn_at.get(attacker_name, 0) or 0)
+        if now - last < 0.75:
+            return
+        self._ff_warn_at[attacker_name] = now
+        attacker = self._get_player(attacker_name)
+        if attacker is None:
+            return
+        self._send_popup(attacker, self._t("FRIENDLY_FIRE_POPUP"))
 
     @event_handler
     def on_player_death(self, event: PlayerDeathEvent):
@@ -522,11 +565,11 @@ class ARCShooterGamePlugin(Plugin):
                         weapon_id=weapon_id,
                         friendly=False,
                     )
-                self._broadcast(
+                self._broadcast_death_feed(
                     lobby,
-                    self._t("SCORE_UPDATE").format(
-                        lobby.team_name(TEAM_A), lobby.score_a, lobby.score_b, lobby.team_name(TEAM_B)
-                    ),
+                    victim_name,
+                    killer_name,
+                    friendly=bool(result.get("friendly")),
                 )
                 if result["winner"]:
                     self._damage_log.pop(victim_name, None)
@@ -536,6 +579,7 @@ class ARCShooterGamePlugin(Plugin):
         elif ps is not None:
             ps.deaths += 1
             self._record_career_death(victim_name)
+            self._broadcast_death_feed(lobby, victim_name, None, friendly=False)
         self._damage_log.pop(victim_name, None)
         self._last_attacker.pop(victim_name, None)
 
@@ -627,6 +671,7 @@ class ARCShooterGamePlugin(Plugin):
 
     def _on_fast_tick(self) -> None:
         try:
+            self._expire_purchase_windows()
             for lobby in list(self.lobbies.values()):
                 if lobby.state == STATE_BUYING:
                     self._enforce_buy_freeze(lobby)
@@ -664,9 +709,28 @@ class ARCShooterGamePlugin(Plugin):
                 msg = self._t("BUY_TIME_TIP").format(remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points)
             else:
                 match_remain = int(math.ceil(lobby.match_remaining(now)))
-                msg = self._t("PLAYING_TIP").format(
-                    match_remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points
-                )
+                strategy = self._acquire_strategy(lobby)
+                protect_remain = self._spawn_protect_remaining(ps.name)
+                if protect_remain > 0:
+                    tip_key = (
+                        "PLAYING_TIP_PURCHASE_ARMORY"
+                        if not strategy.uses_shop
+                        else "PLAYING_TIP_PURCHASE"
+                    )
+                    msg = self._t(tip_key).format(
+                        match_remain,
+                        a_name,
+                        lobby.score_a,
+                        lobby.score_b,
+                        b_name,
+                        ps.points,
+                        protect_remain,
+                    )
+                else:
+                    tip_key = "PLAYING_TIP_ARMORY" if not strategy.uses_shop else "PLAYING_TIP"
+                    msg = self._t(tip_key).format(
+                        match_remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points
+                    )
             if hasattr(player, "send_tip"):
                 try:
                     player.send_tip(msg)
@@ -729,11 +793,11 @@ class ARCShooterGamePlugin(Plugin):
         if lobby.state in (STATE_BUYING, STATE_PLAYING):
             self._notify(player, self._t("JOIN_OK_MATCH"))
             strategy = self._acquire_strategy(lobby)
-            weapons = self.config_store.weapons if self.config_store else {}
-            strategy.assign_on_match_start(lobby.players[player.name], weapons, lobby.map_cfg or {})
+            self._assign_match_loadout(lobby.players[player.name], lobby)
             self._prepare_fighter(player, lobby)
             self._restore_player_loadout(player, lobby, gadgets=True)
             self._apply_team_name_tag(player, lobby)
+            self._send_team_assign_title(player, lobby)
             if lobby.state == STATE_BUYING and strategy.uses_buy_phase:
                 self._set_buy_freeze(player)
             elif lobby.state == STATE_PLAYING:
@@ -795,6 +859,7 @@ class ARCShooterGamePlugin(Plugin):
     def _leave_match(self, player: Player, lobby: Lobby) -> None:
         lobby.leave(player.name)
         self.player_to_lobby.pop(player.name, None)
+        self._ff_warn_at.pop(player.name, None)
         self._clear_buy_freeze(player.name)
         self._clear_match_effects(player.name)
         self._restore_player(player, after_match=True)
@@ -921,34 +986,45 @@ class ARCShooterGamePlugin(Plugin):
     def _finish_countdown_and_start(self, lobby: Lobby, now: float) -> None:
         strategy = self._acquire_strategy(lobby)
         buy_seconds = self.config_store.buy_time() if self.config_store else 20
+        # 军械库/商店开局都进入配置/购买窗：全员无敌 + 移速 0
         if not strategy.uses_buy_phase:
             buy_seconds = 0
-        weapons = self.config_store.weapons if self.config_store else {}
-        mode_cfg = lobby.map_cfg or {}
         for ps in lobby.online_players():
             member = self._get_player(ps.name)
             if member is None:
                 continue
-            strategy.assign_on_match_start(ps, weapons, mode_cfg)
+            self._assign_match_loadout(ps, lobby)
             self._prepare_fighter(member, lobby)
             self._restore_player_loadout(member, lobby, gadgets=True)
-            if strategy.uses_buy_phase:
+            if buy_seconds > 0:
                 self._set_buy_freeze(member)
+                self._give_arc_coin(member)
         self._apply_lobby_name_tags(lobby)
         lobby.begin_buy(buy_seconds, now)
         if buy_seconds <= 0:
-            self._enter_playing(lobby, now)
+            self._enter_playing(lobby, now, remind_team=True)
             return
-        self._title_lobby(
-            lobby,
-            self._t("TITLE_BUY"),
-            self._t("TITLE_BUY_SUB").format(buy_seconds),
-            fade_in=5,
-            stay=40,
-            fade_out=10,
-        )
+        buy_title = self._t("TITLE_BUY")
+        buy_sub = self._t("TITLE_BUY_SUB").format(buy_seconds)
+        for ps in lobby.online_players():
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            color = TEAM_NAME_COLOR.get(ps.team, "§f")
+            team_name = lobby.team_name(ps.team)
+            self._send_title(
+                member,
+                self._t("TITLE_YOUR_TEAM").format(color, team_name),
+                buy_sub,
+                fade_in=5,
+                stay=55,
+                fade_out=10,
+            )
+            member.send_message(f"{buy_title} · {buy_sub}")
+            self._apply_team_name_tag(member, lobby)
 
-    def _enter_playing(self, lobby: Lobby, now: float) -> None:
+
+    def _enter_playing(self, lobby: Lobby, now: float, remind_team: bool = False) -> None:
         match_seconds = lobby.match_time_seconds
         lobby.begin_playing(match_seconds, now)
         for ps in lobby.online_players():
@@ -956,17 +1032,41 @@ class ARCShooterGamePlugin(Plugin):
             if member is None:
                 continue
             self._clear_buy_freeze(ps.name)
+            self._take_arc_coin(member)
             self._apply_match_buffs(member)
+            self._apply_team_name_tag(member, lobby)
+            self._send_toast(
+                member,
+                self._t("MATCH_START_TOAST_TITLE"),
+                self._t("MATCH_START_TOAST_CONTENT"),
+            )
         match_min = lobby.match_time_minutes
         self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
-        self._title_lobby(
-            lobby,
-            self._t("TITLE_BATTLE"),
-            self._t("TITLE_BATTLE_SUB").format(match_min, lobby.target_score),
-            fade_in=5,
-            stay=50,
-            fade_out=10,
-        )
+        battle_sub = self._t("TITLE_BATTLE_SUB").format(match_min, lobby.target_score)
+        if remind_team:
+            for ps in lobby.online_players():
+                member = self._get_player(ps.name)
+                if member is None:
+                    continue
+                color = TEAM_NAME_COLOR.get(ps.team, "§f")
+                team_name = lobby.team_name(ps.team)
+                self._send_title(
+                    member,
+                    self._t("TITLE_YOUR_TEAM").format(color, team_name),
+                    battle_sub,
+                    fade_in=5,
+                    stay=55,
+                    fade_out=10,
+                )
+        else:
+            self._title_lobby(
+                lobby,
+                self._t("TITLE_BATTLE"),
+                battle_sub,
+                fade_in=5,
+                stay=50,
+                fade_out=10,
+            )
 
     def _tick_match_end_warnings(self, lobby: Lobby, now: float) -> None:
         remain = lobby.match_remaining(now)
@@ -1038,19 +1138,68 @@ class ARCShooterGamePlugin(Plugin):
         remove_item_count(player, ARC_COIN_ITEM, 64)
         set_slot_item(player, ARC_COIN_HOTBAR_SLOT, ARC_COIN_ITEM, 1, 0)
 
+    def _take_arc_coin(self, player: Player) -> None:
+        remove_item_count(player, ARC_COIN_ITEM, 64)
+
+    def _purchase_window_seconds(self) -> float:
+        if self.config_store is not None:
+            return float(max(1, self.config_store.buy_time()))
+        return float(SPAWN_PROTECT_SECONDS)
+
+    def _spawn_protect_remaining(self, player_name: str) -> int:
+        until = self._spawn_protect_until.get(player_name)
+        if until is None:
+            return 0
+        remain = until - time.time()
+        if remain <= 0:
+            return 0
+        return int(math.ceil(remain))
+
+    def _can_use_purchase_ui(self, player: Player) -> bool:
+        """购买/换装仅限购买阶段或无敌窗。"""
+        lobby = self._lobby_of(player.name)
+        if lobby is None:
+            return False
+        if lobby.state == STATE_BUYING:
+            return True
+        if lobby.state == STATE_PLAYING and self._is_spawn_protected(player.name):
+            return True
+        return False
+
+    def _expire_purchase_windows(self) -> None:
+        now = time.time()
+        expired = [
+            name
+            for name, until in list(self._spawn_protect_until.items())
+            if until is not None and now >= until
+        ]
+        for name in expired:
+            self._spawn_protect_until.pop(name, None)
+            player = self._get_player(name)
+            if player is None:
+                continue
+            self._take_arc_coin(player)
+            lobby = self._lobby_of(name)
+            if lobby is not None:
+                self._apply_team_name_tag(player, lobby)
+            player.send_message(self._t("PURCHASE_WINDOW_ENDED"))
+
     def _try_open_shop(self, player: Player) -> bool:
         lobby = self._lobby_of(player.name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             return False
-        strategy = self._acquire_strategy(lobby)
-        if not strategy.uses_shop:
-            player.send_message(self._t("SHOP_DISABLED_MODE"))
-            return True
         now = time.time()
         last = self._shop_open_at.get(player.name, 0.0)
         if now - last < SHOP_DEBOUNCE_SECONDS:
             return True
         self._shop_open_at[player.name] = now
+        if not self._can_use_purchase_ui(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return True
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            self._show_armory(player)
+            return True
         self._show_shop(player)
         return True
 
@@ -1092,7 +1241,7 @@ class ARCShooterGamePlugin(Plugin):
         if self.config_store is None:
             return
         weapons = self.config_store.weapons
-        for wid in (ps.primary_id, ps.secondary_id):
+        for wid in (ps.primary_id, ps.secondary_id, ps.melee_id):
             if not wid:
                 continue
             weapon = weapons.get(wid)
@@ -1134,6 +1283,7 @@ class ARCShooterGamePlugin(Plugin):
 
         give_owned(ps.primary_id, "primary")
         give_owned(ps.secondary_id, "secondary")
+        give_owned(ps.melee_id, "melee")
         give_owned(ps.armor_id, "armor")
         if gadgets:
             for idx, gid in enumerate(ps.gadgets):
@@ -1170,7 +1320,7 @@ class ARCShooterGamePlugin(Plugin):
         weapons = self.config_store.weapons
         owned: List[str] = []
         if ps is not None:
-            for wid in (ps.primary_id, ps.secondary_id, *(ps.gadgets or [])):
+            for wid in (ps.primary_id, ps.secondary_id, ps.melee_id, *(ps.gadgets or [])):
                 if wid:
                     owned.append(str(wid))
         if held:
@@ -1211,26 +1361,59 @@ class ARCShooterGamePlugin(Plugin):
             if friendly:
                 return
             self.career_store.record_death(victim_name, xuid=self._player_xuid(victim))
+            xp_gain = 0
+            if self.config_store is not None:
+                xp_gain = self.config_store.xp_per_kill()
             stats = self.career_store.record_kill(
                 killer_name,
                 weapon_id=weapon_id,
                 xuid=self._player_xuid(killer),
+                xp_gain=xp_gain,
             )
+            if killer is not None and xp_gain > 0:
+                killer.send_message(self._t("XP_KILL_GAIN").format(xp_gain))
             if killer is not None:
                 self._sync_kd_titles(killer, stats.kd)
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] career combat: {e}")
 
-    def _record_career_match(self, name: str, *, won: bool, mvp: bool = False) -> None:
+    def _record_career_match(
+        self,
+        name: str,
+        *,
+        won: bool,
+        draw: bool = False,
+        mvp: bool = False,
+        kills: int = 0,
+        team_size: int = 1,
+    ) -> None:
         if self.career_store is None:
             return
         player = self._get_player(name)
+        settlement = 0
+        if self.config_store is not None:
+            settlement = calc_match_settlement_xp(
+                kills,
+                won=won and not draw,
+                mvp=mvp,
+                xp_per_kill=self.config_store.xp_per_kill(),
+                win_bonus_percent=self.config_store.xp_win_bonus_percent(),
+                mvp_per_teammate=self.config_store.xp_mvp_per_teammate(),
+                team_size=team_size,
+            )
         try:
             stats = self.career_store.record_match_end(
-                name, won=won, mvp=mvp, xuid=self._player_xuid(player)
+                name,
+                won=won and not draw,
+                draw=draw,
+                mvp=mvp,
+                xuid=self._player_xuid(player),
+                settlement_xp=settlement,
             )
             if player is not None:
                 self._sync_kd_titles(player, stats.kd)
+                if settlement > 0:
+                    player.send_message(self._t("XP_SETTLEMENT_GAIN").format(settlement))
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] career match {name}: {e}")
 
@@ -1328,6 +1511,39 @@ class ARCShooterGamePlugin(Plugin):
                 pass
         player.send_message(f"[{title_s}] {content_s}".rstrip())
 
+    def _send_popup(self, player: Player, message: str) -> None:
+        msg = str(message or "")
+        if not msg:
+            return
+        if hasattr(player, "send_popup"):
+            try:
+                player.send_popup(msg)
+                return
+            except Exception:
+                pass
+        if hasattr(player, "send_tip"):
+            try:
+                player.send_tip(msg)
+                return
+            except Exception:
+                pass
+        player.send_message(msg)
+
+    def _send_team_assign_title(self, player: Player, lobby: Lobby) -> None:
+        ps = lobby.players.get(player.name)
+        if ps is None:
+            return
+        color = TEAM_NAME_COLOR.get(ps.team, "§f")
+        team_name = lobby.team_name(ps.team)
+        self._send_title(
+            player,
+            self._t("TITLE_YOUR_TEAM").format(color, team_name),
+            self._t("TITLE_YOUR_TEAM_SUB"),
+            fade_in=5,
+            stay=50,
+            fade_out=10,
+        )
+
     def _send_kill_toast(self, player: Player, victim_name: str) -> None:
         # 基岩字形 \uE109 = 剑（与弧光核心 bedrock_glyphs.SWORD 一致）
         sword = "\uE109"
@@ -1412,9 +1628,22 @@ class ARCShooterGamePlugin(Plugin):
         a_name = lobby.team_name(TEAM_A)
         b_name = lobby.team_name(TEAM_B)
         score_a, score_b = lobby.score_a, lobby.score_b
-        for ps in lobby.result_rows():
-            won = bool(winner) and ps.team == winner
-            self._record_career_match(ps.name, won=won, mvp=ps.name in mvp_names)
+        rows = lobby.result_rows()
+        team_sizes = {
+            TEAM_A: sum(1 for row in rows if row.team == TEAM_A),
+            TEAM_B: sum(1 for row in rows if row.team == TEAM_B),
+        }
+        for ps in rows:
+            draw = winner is None
+            won = (not draw) and bool(winner) and ps.team == winner
+            self._record_career_match(
+                ps.name,
+                won=won,
+                draw=draw,
+                mvp=ps.name in mvp_names,
+                kills=ps.kills,
+                team_size=team_sizes.get(ps.team, 1),
+            )
         for name in still:
             self.player_to_lobby.pop(name, None)
             member = self._get_player(name)
@@ -1766,13 +1995,13 @@ class ARCShooterGamePlugin(Plugin):
         if until is None:
             return False
         if time.time() >= until:
-            self._spawn_protect_until.pop(player_name, None)
             return False
         return True
 
     def _apply_spawn_protect(self, player: Player) -> None:
-        # 仅用 ActorDamageEvent 取消伤害实现无敌，不加隐身/抗性效果
-        self._spawn_protect_until[player.name] = time.time() + SPAWN_PROTECT_SECONDS
+        # 无敌窗 = 购买/换装窗；期间发放弧光币
+        self._spawn_protect_until[player.name] = time.time() + self._purchase_window_seconds()
+        self._give_arc_coin(player)
         lobby = self._lobby_of(player.name)
         if lobby is not None:
             self._apply_team_name_tag(player, lobby)
@@ -1787,21 +2016,40 @@ class ARCShooterGamePlugin(Plugin):
 
     def _set_buy_freeze(self, player: Player) -> None:
         self._buy_frozen.add(player.name)
+        # 移速归零 + 极高缓速，避免属性被其它插件/效果顶掉后还能跑
         self._set_movement_speed(player.name, 0.0)
+        try:
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f"effect {format_player_name(player.name)} speed 0 0 true",
+            )
+        except Exception:
+            pass
+        self._dispatch_effect(player.name, "slowness", MATCH_BUFF_DURATION_SECONDS, 255)
 
     def _clear_buy_freeze(self, player_name: str) -> None:
         if player_name not in self._buy_frozen:
             return
         self._buy_frozen.discard(player_name)
         self._set_movement_speed(player_name, DEFAULT_MOVEMENT_SPEED)
+        try:
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f"effect {format_player_name(player_name)} slowness 0 0 true",
+            )
+        except Exception:
+            pass
 
     def _enforce_buy_freeze(self, lobby: Lobby) -> None:
         for ps in lobby.online_players():
-            if ps.name in self._buy_frozen:
-                continue
             player = self._get_player(ps.name)
-            if player is not None:
+            if player is None:
+                continue
+            if ps.name not in self._buy_frozen:
                 self._set_buy_freeze(player)
+            else:
+                # 每 tick 重压移速，防止被其它逻辑改回
+                self._set_movement_speed(ps.name, 0.0)
 
     def _player_is_sneaking(self, player: Player) -> bool:
         for attr in ("is_sneaking", "sneaking", "is_crouching"):
@@ -1838,6 +2086,40 @@ class ARCShooterGamePlugin(Plugin):
 
     def _colored_team_name(self, lobby: Lobby, team_id: str) -> str:
         return self._colored_label(lobby.team_name(team_id), team_id)
+
+    def _colored_player_name(self, lobby: Lobby, player_name: str) -> str:
+        ps = lobby.players.get(player_name)
+        team = ps.team if ps is not None else None
+        return self._colored_label(player_name, team)
+
+    def _broadcast_death_feed(
+        self,
+        lobby: Lobby,
+        victim_name: str,
+        killer_name: Optional[str],
+        *,
+        friendly: bool,
+    ) -> None:
+        victim = self._colored_player_name(lobby, victim_name)
+        a_name = self._colored_team_name(lobby, TEAM_A)
+        b_name = self._colored_team_name(lobby, TEAM_B)
+        score_a = lobby.score_a
+        score_b = lobby.score_b
+        if killer_name:
+            killer = self._colored_player_name(lobby, killer_name)
+            if friendly:
+                msg = self._t("DEATH_FEED_TK").format(
+                    victim, killer, a_name, score_a, score_b, b_name
+                )
+            else:
+                msg = self._t("DEATH_FEED").format(
+                    victim, killer, a_name, score_a, score_b, b_name
+                )
+        else:
+            msg = self._t("DEATH_FEED_SUICIDE").format(
+                victim, a_name, score_a, score_b, b_name
+            )
+        self._broadcast(lobby, msg)
 
     def _broadcast(self, lobby: Lobby, message: str) -> None:
         for ps in lobby.online_players():
@@ -1958,7 +2240,9 @@ class ARCShooterGamePlugin(Plugin):
             player.name_tag = self._team_name_tag(
                 player.name,
                 ps.team,
-                invincible=self._is_spawn_protected(player.name),
+                invincible=(
+                    lobby.state == STATE_BUYING or self._is_spawn_protected(player.name)
+                ),
             )
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] set name_tag for {player.name}: {e}")
@@ -2072,6 +2356,62 @@ class ARCShooterGamePlugin(Plugin):
         assert self.config_store is not None
         return SlotCapacities.from_layout(self.config_store.layout())
 
+    def _default_weapons(self) -> Dict[str, str]:
+        if self.config_store is None:
+            return {}
+        return self.config_store.default_weapons()
+
+    def _player_level(self, name: str) -> int:
+        if self.career_store is None or self.config_store is None:
+            return 0
+        stats = self.career_store.get(name)
+        return level_from_xp(
+            stats.xp,
+            xp_per_level=self.config_store.xp_per_level(),
+            max_level=self.config_store.max_level(),
+        )
+
+    def _gadget_slot_count(self) -> int:
+        if self.config_store is None:
+            return 2
+        return max(0, self._slot_capacities().gadget)
+
+    def _assign_match_loadout(self, ps: Any, lobby: Lobby) -> None:
+        strategy = self._acquire_strategy(lobby)
+        weapons = self.config_store.weapons if self.config_store else {}
+        defaults = self._default_weapons()
+        saved = None
+        if self.loadout_store is not None:
+            saved = self.loadout_store.get(ps.name, defaults=defaults)
+        strategy.assign_on_match_start(
+            ps,
+            weapons,
+            lobby.map_cfg or {},
+            defaults=defaults,
+            saved_loadout=saved,
+            player_level=self._player_level(ps.name),
+            gadget_slots=self._gadget_slot_count(),
+        )
+
+    def _reapply_active_loadout(self, player: Player, lobby: Lobby) -> None:
+        """无敌窗内切换预设后立刻刷新背包。"""
+        ps = lobby.players.get(player.name)
+        if ps is None:
+            return
+        self._assign_match_loadout(ps, lobby)
+        self._clear_player(player.name)
+        clear_armor(player)
+        self._restore_player_loadout(player, lobby, gadgets=True)
+        self._give_arc_coin(player)
+        try:
+            self.server.scheduler.run_task(
+                self,
+                lambda p=player, s=ps: self._apply_owned_weapon_ammo(p, s),
+                delay=3,
+            )
+        except Exception:
+            self._apply_owned_weapon_ammo(player, ps)
+
     def _apply_purchase_items(
         self,
         player: Player,
@@ -2116,9 +2456,12 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
+        if not self._can_use_purchase_ui(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return
         strategy = self._acquire_strategy(lobby)
         if not strategy.uses_shop:
-            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            player.send_message(self._t("SHOP_USE_ARMORY"))
             return
         weapon = self.config_store.weapons.get(weapon_id)
         if weapon is None:
@@ -2132,8 +2475,10 @@ class ARCShooterGamePlugin(Plugin):
             weapon,
             self.config_store.weapons,
             self._slot_capacities(),
+            default_weapons=self._default_weapons(),
         )
         wtype = str(weapon.get("type") or "")
+        wcat = str(weapon.get("category") or "")
         if not outcome.ok:
             if outcome.reason == REASON_ALREADY_OWNED:
                 player.send_message(self._t("BUY_ALREADY_OWNED").format(weapon["display_name"]))
@@ -2144,8 +2489,8 @@ class ARCShooterGamePlugin(Plugin):
             elif outcome.reason == REASON_UNKNOWN:
                 player.send_message(self._t("BUY_FAIL_UNKNOWN"))
             elif outcome.reason == REASON_DISABLED:
-                player.send_message(self._t("SHOP_DISABLED_MODE"))
-            self._show_shop_category(player, wtype)
+                player.send_message(self._t("SHOP_USE_ARMORY"))
+            self._show_shop_weapons(player, wtype, wcat)
             return
         self._apply_purchase_items(
             player,
@@ -2154,12 +2499,23 @@ class ARCShooterGamePlugin(Plugin):
             slot_index=outcome.slot_index,
         )
         if outcome.credit > 0:
-            player.send_message(
-                self._t("BUY_OK_UPGRADE").format(weapon["display_name"], outcome.pay, outcome.points_left)
-            )
+            if outcome.pay > 0:
+                player.send_message(
+                    self._t("BUY_OK_UPGRADE").format(weapon["display_name"], outcome.pay, outcome.points_left)
+                )
+            elif outcome.pay < 0:
+                player.send_message(
+                    self._t("BUY_OK_DOWNGRADE").format(
+                        weapon["display_name"], -outcome.pay, outcome.points_left
+                    )
+                )
+            else:
+                player.send_message(
+                    self._t("BUY_OK_SWAP").format(weapon["display_name"], outcome.points_left)
+                )
         else:
             player.send_message(self._t("BUY_OK").format(weapon["display_name"], outcome.points_left))
-        self._show_shop_category(player, wtype)
+        self._show_shop_weapons(player, wtype, wcat)
 
     # ---------- ui ----------
 
@@ -2174,6 +2530,8 @@ class ARCShooterGamePlugin(Plugin):
         try:
             form = ActionForm(title=self._t("MENU_TITLE"), content=self._t("MENU_CONTENT"))
             form.add_button(self._t("BTN_LOBBY_LIST"), on_click=lambda sender: self._show_lobby_list(sender))
+            form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
+            form.add_button(self._t("BTN_LEADERBOARD"), on_click=lambda sender: self._show_kd_leaderboard(sender))
             form.add_button(self._t("BTN_PROFILE"), on_click=lambda sender: self._show_profile(sender))
             if self._is_op(player):
                 form.add_button(self._t("BTN_CONFIG_MAPS"), on_click=lambda sender: self._show_config_maps(sender))
@@ -2183,13 +2541,78 @@ class ARCShooterGamePlugin(Plugin):
             self._safe_log("error", f"[ARCShooterGame] root menu: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
 
+    def _show_kd_leaderboard(self, player: Player, page: int = 0) -> None:
+        try:
+            if self.career_store is None:
+                player.send_message(self._t("LEADERBOARD_UNAVAILABLE"))
+                return
+            ranked = self.career_store.list_ranked_by_kd()
+            page_size = 12
+            total = len(ranked)
+            page_count = max(1, (total + page_size - 1) // page_size) if total else 1
+            page = max(0, min(int(page), page_count - 1))
+            if not ranked:
+                body = self._t("LEADERBOARD_EMPTY")
+            else:
+                start = page * page_size
+                chunk = ranked[start : start + page_size]
+                lines = []
+                for i, stats in enumerate(chunk):
+                    rank = start + i + 1
+                    color = self._rarity_color(stats.title_rarity)
+                    lines.append(
+                        self._t("LEADERBOARD_LINE").format(
+                            rank,
+                            stats.name,
+                            f"{stats.kd:.2f}",
+                            color,
+                            stats.title_rarity,
+                            stats.title_name,
+                        )
+                    )
+                body = "\n".join(lines)
+            form = ActionForm(
+                title=self._t("LEADERBOARD_TITLE"),
+                content=self._t("LEADERBOARD_CONTENT").format(
+                    total, page + 1, page_count, body
+                ),
+            )
+            if page > 0:
+                form.add_button(
+                    self._t("BTN_PREV_PAGE"),
+                    on_click=lambda sender, p=page - 1: self._show_kd_leaderboard(sender, p),
+                )
+            if page + 1 < page_count:
+                form.add_button(
+                    self._t("BTN_NEXT_PAGE"),
+                    on_click=lambda sender, p=page + 1: self._show_kd_leaderboard(sender, p),
+                )
+            form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
+            player.send_form(form)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] leaderboard: {e}\n{traceback.format_exc()}")
+            player.send_message(self._t("PANEL_ERROR"))
+
     def _profile_content(self, stats) -> str:
         rarity = stats.title_rarity
         title = stats.title_name
         color = self._rarity_color(rarity)
+        xp_per = self.config_store.xp_per_level() if self.config_store else 100
+        max_lv = self.config_store.max_level() if self.config_store else 100
+        level, into, per = xp_progress(stats.xp, xp_per_level=xp_per, max_level=max_lv)
+        if level >= max_lv:
+            level_line = self._t("PROFILE_LINE_LEVEL_MAX").format(level, stats.xp)
+        else:
+            level_line = self._t("PROFILE_LINE_LEVEL").format(level, into, per)
         lines = [
+            level_line,
             self._t("PROFILE_LINE_KD").format(stats.kills, stats.deaths, f"{stats.kd:.2f}"),
-            self._t("PROFILE_LINE_MATCHES").format(stats.matches, stats.wins, stats.mvps),
+            self._t("PROFILE_LINE_MATCHES").format(
+                stats.matches, stats.wins, stats.losses, stats.draws
+            ),
+            self._t("PROFILE_LINE_MVP").format(
+                stats.mvps, stats.win_mvps, stats.lose_mvps
+            ),
             self._t("PROFILE_LINE_TITLE").format(color, rarity, title),
             "",
             self._t("PROFILE_WEAPON_HEADER"),
@@ -2271,6 +2694,7 @@ class ARCShooterGamePlugin(Plugin):
             )
             form = ActionForm(title=self._t("LOBBY_TITLE"), content=content)
             is_admin = lobby.admin == player.name
+            form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
             if is_admin and lobby.state == STATE_LOBBY:
                 if lobby.prefer_random_map:
                     map_mode_btn = self._t("BTN_SELECT_MAP_MODE")
@@ -2521,7 +2945,9 @@ class ARCShooterGamePlugin(Plugin):
         ps = lobby.players.get(player.name)
         if ps is None:
             return
-        content = self._t("MATCH_CONTENT").format(
+        strategy = self._acquire_strategy(lobby)
+        content_key = "MATCH_CONTENT_ARMORY" if not strategy.uses_shop else "MATCH_CONTENT"
+        content = self._t(content_key).format(
             lobby.team_name(TEAM_A),
             lobby.score_a,
             lobby.team_name(TEAM_B),
@@ -2533,7 +2959,10 @@ class ARCShooterGamePlugin(Plugin):
             ps.assists,
         )
         form = ActionForm(title=self._t("MATCH_TITLE").format(lobby.display_name), content=content)
-        form.add_button(self._t("BTN_SHOP"), on_click=lambda sender: self._show_shop(sender))
+        if strategy.uses_shop:
+            form.add_button(self._t("BTN_SHOP"), on_click=lambda sender: self._show_shop(sender))
+        else:
+            form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
         form.add_button(self._t("BTN_LEAVE_MATCH"), on_click=lambda sender: self._show_leave_match_confirm(sender))
         form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
         player.send_form(form)
@@ -2555,9 +2984,13 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
+        if not self._can_use_purchase_ui(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return
         strategy = self._acquire_strategy(lobby)
         if not strategy.uses_shop:
-            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            player.send_message(self._t("SHOP_USE_ARMORY"))
+            self._show_armory(player)
             return
         ps = lobby.players.get(player.name)
         if ps is None:
@@ -2565,13 +2998,17 @@ class ARCShooterGamePlugin(Plugin):
         layout = self.config_store.layout() if self.config_store else {}
         p0, p1 = slot_range(layout, "primary")
         s0, s1 = slot_range(layout, "secondary")
+        m0, m1 = slot_range(layout, "melee")
         g0, g1 = slot_range(layout, "gadget")
         form = ActionForm(
             title=self._t("SHOP_TITLE"),
-            content=self._t("SHOP_CONTENT").format(ps.points, p1 - p0, s1 - s0, g1 - g0),
+            content=self._t("SHOP_CONTENT").format(
+                ps.points, p1 - p0, s1 - s0, m1 - m0, g1 - g0
+            ),
         )
         form.add_button(self._t("SHOP_PRIMARY"), on_click=lambda sender: self._show_shop_category(sender, "primary"))
         form.add_button(self._t("SHOP_SECONDARY"), on_click=lambda sender: self._show_shop_category(sender, "secondary"))
+        form.add_button(self._t("SHOP_MELEE"), on_click=lambda sender: self._show_shop_category(sender, "melee"))
         form.add_button(self._t("SHOP_ARMOR"), on_click=lambda sender: self._show_shop_category(sender, "armor"))
         form.add_button(self._t("SHOP_GADGET"), on_click=lambda sender: self._show_shop_category(sender, "gadget"))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
@@ -2582,9 +3019,12 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
             player.send_message(self._t("SHOP_NOT_IN_MATCH"))
             return
+        if not self._can_use_purchase_ui(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return
         strategy = self._acquire_strategy(lobby)
         if not strategy.uses_shop:
-            player.send_message(self._t("SHOP_DISABLED_MODE"))
+            player.send_message(self._t("SHOP_USE_ARMORY"))
             return
         ps = lobby.players.get(player.name)
         if ps is None or self.config_store is None:
@@ -2592,37 +3032,406 @@ class ARCShooterGamePlugin(Plugin):
         title_map = {
             "primary": self._t("SHOP_PRIMARY"),
             "secondary": self._t("SHOP_SECONDARY"),
+            "melee": self._t("SHOP_MELEE"),
             "armor": self._t("SHOP_ARMOR"),
             "gadget": self._t("SHOP_GADGET"),
         }
-        weapons = self.config_store.weapons_of_type(weapon_type)
+        type_label = title_map.get(weapon_type, weapon_type)
+        categories = self.config_store.categories_for_type(weapon_type)
+        if not categories:
+            self._show_shop_weapons(player, weapon_type, "")
+            return
+        if len(categories) == 1:
+            self._show_shop_weapons(player, weapon_type, categories[0])
+            return
         form = ActionForm(
-            title=self._t("SHOP_CAT_TITLE").format(title_map.get(weapon_type, weapon_type)),
+            title=self._t("SHOP_FILTER_TITLE").format(type_label),
+            content=self._t("SHOP_FILTER_CONTENT").format(ps.points),
+        )
+        for cat in categories:
+            label = self._category_label(cat)
+            form.add_button(
+                label,
+                on_click=lambda sender, t=weapon_type, c=cat: self._show_shop_weapons(sender, t, c),
+            )
+        form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
+        player.send_form(form)
+
+    def _show_shop_weapons(self, player: Player, weapon_type: str, category: str) -> None:
+        lobby = self._lobby_of(player.name)
+        if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
+            player.send_message(self._t("SHOP_NOT_IN_MATCH"))
+            return
+        if not self._can_use_purchase_ui(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return
+        strategy = self._acquire_strategy(lobby)
+        if not strategy.uses_shop:
+            player.send_message(self._t("SHOP_USE_ARMORY"))
+            return
+        ps = lobby.players.get(player.name)
+        if ps is None or self.config_store is None:
+            return
+        title_map = {
+            "primary": self._t("SHOP_PRIMARY"),
+            "secondary": self._t("SHOP_SECONDARY"),
+            "melee": self._t("SHOP_MELEE"),
+            "armor": self._t("SHOP_ARMOR"),
+            "gadget": self._t("SHOP_GADGET"),
+        }
+        type_label = title_map.get(weapon_type, weapon_type)
+        if category:
+            weapons = self.config_store.weapons_of_category(weapon_type, category)
+            title = self._t("SHOP_CAT_TITLE").format(
+                f"{type_label} · {self._category_label(category)}"
+            )
+        else:
+            weapons = self.config_store.weapons_of_type(weapon_type)
+            title = self._t("SHOP_CAT_TITLE").format(type_label)
+        form = ActionForm(
+            title=title,
             content=self._t("SHOP_CAT_CONTENT").format(ps.points),
         )
         if not weapons:
-            form = ActionForm(
-                title=self._t("SHOP_CAT_TITLE").format(title_map.get(weapon_type, weapon_type)),
-                content=self._t("SHOP_EMPTY"),
+            form = ActionForm(title=title, content=self._t("SHOP_EMPTY"))
+            form.add_button(
+                self._t("BACK"),
+                on_click=lambda sender, t=weapon_type: self._show_shop_category(sender, t),
             )
-            form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
             player.send_form(form)
             return
         owned = owned_weapon_ids(ps)
         capacities = self._slot_capacities()
         for weapon in weapons:
             owned_mark = self._t("SHOP_OWNED") if weapon["id"] in owned else ""
-            quote = strategy.quote(ps, weapon, self.config_store.weapons, capacities)
+            quote = strategy.quote(
+                ps,
+                weapon,
+                self.config_store.weapons,
+                capacities,
+                default_weapons=self._default_weapons(),
+            )
             if quote.is_upgrade:
                 label = self._t("SHOP_ITEM_UPGRADE").format(
                     weapon["display_name"], quote.pay, weapon["cost"], owned_mark
+                )
+            elif quote.is_downgrade:
+                label = self._t("SHOP_ITEM_DOWNGRADE").format(
+                    weapon["display_name"], -quote.pay, weapon["cost"], owned_mark
+                )
+            elif quote.is_trade:
+                label = self._t("SHOP_ITEM_SWAP").format(
+                    weapon["display_name"], weapon["cost"], owned_mark
                 )
             else:
                 label = self._t("SHOP_ITEM").format(weapon["display_name"], weapon["cost"], owned_mark)
             wid = weapon["id"]
             form.add_button(label, on_click=lambda sender, w=wid: self._buy_weapon(sender, w))
-        form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
+        form.add_button(
+            self._t("BACK"),
+            on_click=lambda sender, t=weapon_type: self._show_shop_category(sender, t),
+        )
         player.send_form(form)
+
+    def _category_label(self, category: str) -> str:
+        key = f"CATEGORY_{category}"
+        text = self._t(key)
+        return text if text != key else category
+
+    def _armory_out_of_match(self, player: Player) -> bool:
+        lobby = self._lobby_of(player.name)
+        if lobby is None:
+            return True
+        return lobby.state in (STATE_LOBBY, STATE_COUNTDOWN)
+
+    def _armory_editable(self, player: Player) -> bool:
+        if self._armory_out_of_match(player):
+            return True
+        return self._can_use_purchase_ui(player)
+
+    def _armory_edit_slot(self, player: Player) -> int:
+        if self.loadout_store is None:
+            return 0
+        defaults = self._default_weapons()
+        self.loadout_store.ensure_presets(player.name, defaults)
+        if player.name not in self._armory_edit_preset:
+            self._armory_edit_preset[player.name] = self.loadout_store.get_active_slot(player.name)
+        return max(0, min(PRESET_COUNT - 1, int(self._armory_edit_preset[player.name])))
+
+    def _set_armory_edit_slot(self, player: Player, slot: int) -> int:
+        slot_i = max(0, min(PRESET_COUNT - 1, int(slot)))
+        self._armory_edit_preset[player.name] = slot_i
+        return slot_i
+
+    def _armory_weapon_name(self, weapon_id: Optional[str]) -> str:
+        if not weapon_id:
+            return self._t("ARMORY_EMPTY")
+        return self._weapon_display_name(weapon_id)
+
+    def _armory_loadout_lines(self, loadout: Any) -> str:
+        lines = [
+            self._t("ARMORY_SLOT_PRIMARY").format(self._armory_weapon_name(loadout.primary_id)),
+            self._t("ARMORY_SLOT_SECONDARY").format(self._armory_weapon_name(loadout.secondary_id)),
+            self._t("ARMORY_SLOT_MELEE").format(self._armory_weapon_name(loadout.melee_id)),
+            self._t("ARMORY_SLOT_ARMOR").format(self._armory_weapon_name(loadout.armor_id)),
+        ]
+        gadgets = list(loadout.gadgets or [])
+        slots = self._gadget_slot_count()
+        for i in range(slots):
+            wid = gadgets[i] if i < len(gadgets) else None
+            lines.append(
+                self._t("ARMORY_SLOT_GADGET").format(i + 1, self._armory_weapon_name(wid))
+            )
+        return "\n".join(lines)
+
+    def _show_armory(self, player: Player) -> None:
+        try:
+            if self.loadout_store is None or self.config_store is None:
+                player.send_message(self._t("ARMORY_UNAVAILABLE"))
+                return
+            in_match = not self._armory_out_of_match(player)
+            editable = self._armory_editable(player)
+            if in_match and not editable:
+                player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+                return
+            defaults = self._default_weapons()
+            self.loadout_store.ensure_presets(player.name, defaults)
+            active = self.loadout_store.get_active_slot(player.name)
+            edit_slot = self._armory_edit_slot(player)
+            level = self._player_level(player.name)
+            xp = 0
+            if self.career_store is not None:
+                xp = self.career_store.get(player.name).xp
+            xp_per = self.config_store.xp_per_level()
+            max_lv = self.config_store.max_level()
+            level_i, into, per = xp_progress(xp, xp_per_level=xp_per, max_level=max_lv)
+            if level_i >= max_lv:
+                level_line = self._t("PROFILE_LINE_LEVEL_MAX").format(level_i, xp)
+            else:
+                level_line = self._t("PROFILE_LINE_LEVEL").format(level_i, into, per)
+            loadout = sanitize_loadout(
+                self.loadout_store.get_preset(player.name, edit_slot, defaults=defaults),
+                self.config_store.weapons,
+                defaults,
+                level,
+                gadget_slots=self._gadget_slot_count(),
+            )
+            note = ""
+            if in_match:
+                remain = self._spawn_protect_remaining(player.name)
+                note = "\n" + self._t("ARMORY_MATCH_WINDOW").format(remain)
+            content = self._t("ARMORY_CONTENT").format(
+                level_line,
+                edit_slot + 1,
+                active + 1,
+                self._armory_loadout_lines(loadout),
+            ) + note
+            form = ActionForm(title=self._t("ARMORY_TITLE"), content=content)
+            for i in range(PRESET_COUNT):
+                mark = self._t("ARMORY_PRESET_ACTIVE") if i == active else ""
+                edit_mark = self._t("ARMORY_PRESET_EDITING") if i == edit_slot else ""
+                form.add_button(
+                    self._t("ARMORY_BTN_PRESET").format(i + 1, mark, edit_mark),
+                    on_click=lambda sender, s=i: self._armory_select_preset(sender, s),
+                )
+            if editable:
+                form.add_button(
+                    self._t("ARMORY_BTN_PRIMARY"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "primary"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_SECONDARY"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "secondary"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_MELEE"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "melee"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_ARMOR"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "armor"),
+                )
+                for i in range(self._gadget_slot_count()):
+                    form.add_button(
+                        self._t("ARMORY_BTN_GADGET").format(i + 1),
+                        on_click=lambda sender, idx=i: self._show_armory_slot(sender, "gadget", idx),
+                    )
+            if in_match:
+                form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
+            else:
+                form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
+            player.send_form(form)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] armory: {e}\n{traceback.format_exc()}")
+            player.send_message(self._t("PANEL_ERROR"))
+
+    def _armory_select_preset(self, player: Player, slot: int) -> None:
+        if self.loadout_store is None or self.config_store is None:
+            return
+        if not self._armory_editable(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+            return
+        defaults = self._default_weapons()
+        slot_i = self._set_armory_edit_slot(player, slot)
+        self.loadout_store.set_active_slot(player.name, slot_i)
+        lobby = self._lobby_of(player.name)
+        if lobby is not None and lobby.state in (STATE_BUYING, STATE_PLAYING):
+            if not self._can_use_purchase_ui(player):
+                player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+                return
+            self._reapply_active_loadout(player, lobby)
+            player.send_message(self._t("ARMORY_PRESET_APPLIED").format(slot_i + 1))
+        else:
+            player.send_message(self._t("ARMORY_PRESET_SELECTED").format(slot_i + 1))
+        self._show_armory(player)
+
+    def _show_armory_slot(self, player: Player, slot: str, index: int = 0) -> None:
+        if not self._armory_editable(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN") if not self._armory_out_of_match(player) else self._t("ARMORY_READONLY"))
+            self._show_armory(player)
+            return
+        if self.config_store is None:
+            return
+        categories = self.config_store.categories_for_type(slot)
+        slot_labels = {
+            "primary": self._t("ARMORY_BTN_PRIMARY"),
+            "secondary": self._t("ARMORY_BTN_SECONDARY"),
+            "melee": self._t("ARMORY_BTN_MELEE"),
+            "armor": self._t("ARMORY_BTN_ARMOR"),
+            "gadget": self._t("ARMORY_BTN_GADGET").format(index + 1),
+        }
+        label = slot_labels.get(slot, slot)
+        if not categories:
+            self._show_armory_weapons(player, slot, "", index)
+            return
+        if len(categories) == 1:
+            self._show_armory_weapons(player, slot, categories[0], index)
+            return
+        form = ActionForm(
+            title=self._t("ARMORY_PICK_CATEGORY").format(label),
+            content=self._t("ARMORY_EDITING_PRESET").format(self._armory_edit_slot(player) + 1),
+        )
+        for cat in categories:
+            form.add_button(
+                self._category_label(cat),
+                on_click=lambda sender, c=cat, s=slot, i=index: self._show_armory_weapons(
+                    sender, s, c, i
+                ),
+            )
+        form.add_button(self._t("BACK"), on_click=lambda sender: self._show_armory(sender))
+        player.send_form(form)
+
+    def _show_armory_weapons(
+        self, player: Player, slot: str, category: str, index: int = 0
+    ) -> None:
+        if not self._armory_editable(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN") if not self._armory_out_of_match(player) else self._t("ARMORY_READONLY"))
+            self._show_armory(player)
+            return
+        if self.config_store is None or self.loadout_store is None:
+            return
+        level = self._player_level(player.name)
+        edit_slot = self._armory_edit_slot(player)
+        if category:
+            weapons = self.config_store.weapons_of_category(slot, category)
+            title = self._t("ARMORY_PICK_WEAPON").format(
+                self._category_label(category), self._t("LEVEL_LABEL").format(level)
+            )
+        else:
+            weapons = self.config_store.weapons_of_type(slot)
+            title = self._t("ARMORY_PICK_WEAPON").format(slot, self._t("LEVEL_LABEL").format(level))
+        form = ActionForm(
+            title=title,
+            content=self._t("ARMORY_EDITING_PRESET").format(edit_slot + 1),
+        )
+        for weapon in weapons:
+            need = int(weapon.get("unlock_level") or 0)
+            unlocked = weapon_unlocked(weapon, level)
+            if unlocked:
+                label = str(weapon.get("display_name") or weapon["id"])
+            else:
+                label = (
+                    f"§8{weapon.get('display_name') or weapon['id']}"
+                    + self._t("UNLOCK_LOCKED_MARK").format(need)
+                )
+            wid = weapon["id"]
+            form.add_button(
+                label,
+                on_click=lambda sender, w=wid, s=slot, i=index, n=need, ok=unlocked: self._armory_pick(
+                    sender, s, w, i, n, ok
+                ),
+            )
+        form.add_button(
+            self._t("ARMORY_BTN_CLEAR"),
+            on_click=lambda sender, s=slot, i=index: self._armory_pick(
+                sender, s, None, i, 0, True
+            ),
+        )
+        form.add_button(
+            self._t("BACK"),
+            on_click=lambda sender, s=slot, i=index: self._show_armory_slot(sender, s, i),
+        )
+        player.send_form(form)
+
+    def _armory_pick(
+        self,
+        player: Player,
+        slot: str,
+        weapon_id: Optional[str],
+        index: int,
+        need_level: int,
+        unlocked: bool,
+    ) -> None:
+        if not self._armory_editable(player):
+            player.send_message(self._t("PURCHASE_ONLY_INVULN") if not self._armory_out_of_match(player) else self._t("ARMORY_READONLY"))
+            self._show_armory(player)
+            return
+        if self.loadout_store is None or self.config_store is None:
+            return
+        if weapon_id and not unlocked:
+            player.send_message(self._t("UNLOCK_NEED_LEVEL").format(need_level))
+            self._show_armory_weapons(
+                player,
+                slot,
+                str((self.config_store.weapons.get(weapon_id) or {}).get("category") or ""),
+                index,
+            )
+            return
+        defaults = self._default_weapons()
+        edit_slot = self._armory_edit_slot(player)
+        ok, reason, _saved = self.loadout_store.set_slot(
+            player.name,
+            slot,
+            weapon_id,
+            index=index,
+            preset=edit_slot,
+            weapons=self.config_store.weapons,
+            level=self._player_level(player.name),
+            gadget_slots=self._gadget_slot_count(),
+            defaults=defaults,
+        )
+        if not ok:
+            if reason == "locked":
+                player.send_message(self._t("UNLOCK_NEED_LEVEL").format(need_level))
+            else:
+                player.send_message(self._t("PANEL_ERROR"))
+            self._show_armory(player)
+            return
+        if weapon_id:
+            player.send_message(
+                self._t("ARMORY_SAVED").format(self._weapon_display_name(weapon_id))
+            )
+        else:
+            player.send_message(self._t("ARMORY_CLEARED"))
+        lobby = self._lobby_of(player.name)
+        if (
+            lobby is not None
+            and lobby.state in (STATE_BUYING, STATE_PLAYING)
+            and edit_slot == self.loadout_store.get_active_slot(player.name)
+            and self._can_use_purchase_ui(player)
+        ):
+            self._reapply_active_loadout(player, lobby)
+        self._show_armory(player)
 
     # ---------- map config ui ----------
 
@@ -2800,6 +3609,7 @@ class ARCShooterGamePlugin(Plugin):
                     "max_players_per_team": 8,
                     "target_score": 50,
                     "match_time_minutes": 5,
+                    "weapon_acquire": "armory",
                     "teams": {
                         "a": {"name": "红队", "spawns": []},
                         "b": {"name": "蓝队", "spawns": []},

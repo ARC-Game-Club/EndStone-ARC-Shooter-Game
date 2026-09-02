@@ -1,74 +1,134 @@
 {
-  "_comment": "从 Aplok 枪械 BP reload 函数自动提取；运行 scripts/sync_ammo_from_mod.py 更新",
-  "_source": "Aplok枪械BP/functions/weapons/reload",
+  "_comment": "从弧光枪械1.0 BP main.js gunConfig.maxAmmo 提取；计分板为 {gunKey}Ammo",
+  "_source": "C:\\Users\\81135\\Documents\\SERVO\\MCBE\\MCBEShooterGameServer\\bedrock_server\\worlds\\ARCShooterGame\\behavior_packs\\弧光枪械1.0 BP\\scripts\\main.js",
   "weapons": {
+    "m4": {
+      "ammo_scoreboard": "m4Ammo",
+      "default_ammo": 30
+    },
+    "scarl": {
+      "ammo_scoreboard": "scarlAmmo",
+      "default_ammo": 25
+    },
+    "qbz95": {
+      "ammo_scoreboard": "qbz95Ammo",
+      "default_ammo": 30
+    },
+    "qbz191": {
+      "ammo_scoreboard": "qbz191Ammo",
+      "default_ammo": 30
+    },
+    "sar80": {
+      "ammo_scoreboard": "sar80Ammo",
+      "default_ammo": 30
+    },
     "ak12": {
-      "ammo_scoreboard": "ak12",
+      "ammo_scoreboard": "ak12Ammo",
       "default_ammo": 30
     },
-    "ak47": {
-      "ammo_scoreboard": "ak47",
-      "default_ammo": 30
-    },
-    "ak74": {
-      "ammo_scoreboard": "ak74",
-      "default_ammo": 30
-    },
-    "akm": {
-      "ammo_scoreboard": "akm",
-      "default_ammo": 30
-    },
-    "aks74u": {
-      "ammo_scoreboard": "aks74u",
-      "default_ammo": 30
-    },
-    "awp": {
-      "ammo_scoreboard": "awp",
-      "default_ammo": 10
-    },
-    "deagle": {
-      "ammo_scoreboard": "deagle",
-      "default_ammo": 10
-    },
-    "fnfal": {
-      "ammo_scoreboard": "fnfal",
-      "default_ammo": 20
-    },
-    "glock17": {
-      "ammo_scoreboard": "glock17",
-      "default_ammo": 17
-    },
-    "glock18": {
-      "ammo_scoreboard": "glock18",
-      "default_ammo": 17
-    },
-    "m1014": {
-      "ammo_scoreboard": "m1014",
-      "default_ammo": 7
-    },
-    "m249": {
-      "ammo_scoreboard": "m249",
-      "default_ammo": 200
-    },
-    "m4a1": {
-      "ammo_scoreboard": "m4a1",
-      "default_ammo": 30
-    },
-    "mossberg": {
-      "ammo_scoreboard": "mossberg",
+    "fp6": {
+      "ammo_scoreboard": "fp6Ammo",
       "default_ammo": 6
     },
-    "mp5a5": {
-      "ammo_scoreboard": "mp5a5",
+    "ak47": {
+      "ammo_scoreboard": "ak47Ammo",
       "default_ammo": 30
     },
-    "parafal": {
-      "ammo_scoreboard": "parafal",
+    "spas12": {
+      "ammo_scoreboard": "spas12Ammo",
+      "default_ammo": 8
+    },
+    "scarh": {
+      "ammo_scoreboard": "scarhAmmo",
       "default_ammo": 20
     },
-    "rpg7": {
-      "ammo_scoreboard": "rpg7",
-      "default_ammo": 1
+    "saiga308": {
+      "ammo_scoreboard": "saiga308Ammo",
+      "default_ammo": 8
+    },
+    "rpk74": {
+      "ammo_scoreboard": "rpk74Ammo",
+      "default_ammo": 45
+    },
+    "aa12": {
+      "ammo_scoreboard": "aa12Ammo",
+      "default_ammo": 20
+    },
+    "hcar": {
+      "ammo_scoreboard": "hcarAmmo",
+      "default_ammo": 20
+    },
+    "qbb95": {
+      "ammo_scoreboard": "qbb95Ammo",
+      "default_ammo": 60
+    },
+    "ultraleggero": {
+      "ammo_scoreboard": "ultraleggeroAmmo",
+      "default_ammo": 2
+    },
+    "svch": {
+      "ammo_scoreboard": "svchAmmo",
+      "default_ammo": 10
+    },
+    "m249": {
+      "ammo_scoreboard": "m249Ammo",
+      "default_ammo": 75
+    },
+    "minimi": {
+      "ammo_scoreboard": "minimiAmmo",
+      "default_ammo": 75
+    },
+    "mrad": {
+      "ammo_scoreboard": "mradAmmo",
+      "default_ammo": 7
+    },
+    "vshk": {
+      "ammo_scoreboard": "vshkAmmo",
+      "default_ammo": 5
+    },
+    "gm6_lynx": {
+      "ammo_scoreboard": "gm6_lynxAmmo",
+      "default_ammo": 5
+    },
+    "m1911": {
+      "ammo_scoreboard": "m1911Ammo",
+      "default_ammo": 7
+    },
+    "glock17": {
+      "ammo_scoreboard": "glock17Ammo",
+      "default_ammo": 18
+    },
+    "pdp": {
+      "ammo_scoreboard": "pdpAmmo",
+      "default_ammo": 18
+    },
+    "mpl1": {
+      "ammo_scoreboard": "mpl1Ammo",
+      "default_ammo": 18
+    },
+    "pp2000": {
+      "ammo_scoreboard": "pp2000Ammo",
+      "default_ammo": 20
+    },
+    "pmx": {
+      "ammo_scoreboard": "pmxAmmo",
+      "default_ammo": 20
+    },
+    "mp5": {
+      "ammo_scoreboard": "mp5Ammo",
+      "default_ammo": 30
+    },
+    "ump45": {
+      "ammo_scoreboard": "ump45Ammo",
+      "default_ammo": 30
+    },
+    "k7": {
+      "ammo_scoreboard": "k7Ammo",
+      "default_ammo": 30
+    },
+    "p90": {
+      "ammo_scoreboard": "p90Ammo",
+      "default_ammo": 50
     }
   }
 }

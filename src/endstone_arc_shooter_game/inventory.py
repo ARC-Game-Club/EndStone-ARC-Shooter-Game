@@ -23,6 +23,7 @@ ARMOR_ITEM_SLOTS = {
     "minecraft:diamond_helmet": "helmet",
     "minecraft:netherite_helmet": "helmet",
     "minecraft:copper_helmet": "helmet",
+    "arc:6b47_helmet": "helmet",
     "minecraft:leather_chestplate": "chestplate",
     "minecraft:chainmail_chestplate": "chestplate",
     "minecraft:iron_chestplate": "chestplate",
@@ -30,6 +31,7 @@ ARMOR_ITEM_SLOTS = {
     "minecraft:diamond_chestplate": "chestplate",
     "minecraft:netherite_chestplate": "chestplate",
     "minecraft:copper_chestplate": "chestplate",
+    "arc:6b45_vest": "chestplate",
     "minecraft:leather_leggings": "leggings",
     "minecraft:chainmail_leggings": "leggings",
     "minecraft:iron_leggings": "leggings",
@@ -37,6 +39,7 @@ ARMOR_ITEM_SLOTS = {
     "minecraft:diamond_leggings": "leggings",
     "minecraft:netherite_leggings": "leggings",
     "minecraft:copper_leggings": "leggings",
+    "arc:emr_suit": "leggings",
     "minecraft:leather_boots": "boots",
     "minecraft:chainmail_boots": "boots",
     "minecraft:iron_boots": "boots",
@@ -44,6 +47,7 @@ ARMOR_ITEM_SLOTS = {
     "minecraft:diamond_boots": "boots",
     "minecraft:netherite_boots": "boots",
     "minecraft:copper_boots": "boots",
+    "arc:balaclava": "boots",
 }
 _UNSAFE_FILE_CHARS = re.compile(r'[<>:"/\\\\|?*]')
 

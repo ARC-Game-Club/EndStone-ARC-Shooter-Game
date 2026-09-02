@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS map_modes (
     max_players_per_team INTEGER NOT NULL DEFAULT 8,
     target_score INTEGER NOT NULL DEFAULT 50,
     match_time_minutes INTEGER NOT NULL DEFAULT 5,
+    weapon_acquire TEXT NOT NULL DEFAULT 'armory',
     team_a_name TEXT NOT NULL DEFAULT '红队',
     team_b_name TEXT NOT NULL DEFAULT '蓝队',
     PRIMARY KEY (map_id, mode),
@@ -75,6 +76,14 @@ class MapDatabase:
             self._conn.execute(
                 "ALTER TABLE map_modes ADD COLUMN match_time_minutes INTEGER NOT NULL DEFAULT 5"
             )
+        if "weapon_acquire" not in cols:
+            self._conn.execute(
+                "ALTER TABLE map_modes ADD COLUMN weapon_acquire TEXT NOT NULL DEFAULT 'armory'"
+            )
+        # 每次启动：团队死斗强制军械库（暂不用商店）
+        self._conn.execute(
+            "UPDATE map_modes SET weapon_acquire = 'armory' WHERE lower(mode) = 'tdm'"
+        )
 
     def _migrate_from_json_if_needed(self) -> None:
         json_path = PLUGIN_DATA_DIR / "maps.json"
@@ -154,6 +163,15 @@ class MapDatabase:
                         "match_time_minutes": mode_row["match_time_minutes"]
                         if "match_time_minutes" in mode_row.keys()
                         else 5,
+                        "weapon_acquire": (
+                            "armory"
+                            if str(mode).lower() == "tdm"
+                            else (
+                                mode_row["weapon_acquire"]
+                                if "weapon_acquire" in mode_row.keys() and mode_row["weapon_acquire"]
+                                else "shop"
+                            )
+                        ),
                         "teams": teams,
                     }
                 )
@@ -205,8 +223,8 @@ class MapDatabase:
                     """
                     INSERT INTO map_modes (
                         map_id, mode, max_players_per_team, target_score, match_time_minutes,
-                        team_a_name, team_b_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        weapon_acquire, team_a_name, team_b_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         map_id,
@@ -214,6 +232,9 @@ class MapDatabase:
                         mode_cfg.get("max_players_per_team", 8),
                         mode_cfg.get("target_score", 50),
                         mode_cfg.get("match_time_minutes", 5),
+                        "armory" if str(mode).lower() == "tdm" else (
+                            mode_cfg.get("weapon_acquire") or "shop"
+                        ),
                         team_a.get("name", "红队"),
                         team_b.get("name", "蓝队"),
                     ),

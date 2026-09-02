@@ -99,6 +99,7 @@ class PlayerState:
     team_kills: int = 0
     primary_id: Optional[str] = None
     secondary_id: Optional[str] = None
+    melee_id: Optional[str] = None
     armor_id: Optional[str] = None
     gadgets: List[Optional[str]] = field(default_factory=list)
     still_in: bool = True
@@ -439,7 +440,7 @@ class Lobby:
         if ps is None:
             return 0, None
         wtype = str(weapon.get("type") or "")
-        capacity = 1 if wtype in ("primary", "secondary", "armor") else max(0, int(gadget_capacity))
+        capacity = 1 if wtype in ("primary", "secondary", "melee", "armor") else max(0, int(gadget_capacity))
         return record_owned(ps, weapon, capacity)
 
 

@@ -11,13 +11,49 @@ from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 IMPLEMENTED_MODES = {"tdm"}
 KNOWN_MODES = ("tdm", "ffa", "ctf")
-WEAPON_TYPES = ("primary", "secondary", "gadget", "armor")
+WEAPON_TYPES = ("primary", "secondary", "melee", "gadget", "armor")
+WEAPON_CATEGORIES = (
+    "assault_rifle",
+    "smg",
+    "pistol",
+    "shotgun",
+    "lmg",
+    "sniper",
+    "shield",
+    "knife",
+    "frag",
+    "flash",
+    "smoke",
+    "mine",
+    "armor",
+)
+# 槽位 type → 常见分类顺序（军械库 / 商店二级菜单）
+CATEGORIES_BY_TYPE = {
+    "primary": ("assault_rifle", "smg", "shotgun", "lmg", "sniper", "shield"),
+    "secondary": ("pistol", "smg"),
+    "melee": ("knife",),
+    "gadget": ("frag", "flash", "smoke", "mine"),
+    "armor": ("armor",),
+}
+DEFAULT_WEAPON_SETTING_KEYS = {
+    "primary": "DEFAULT_PRIMARY_WEAPON",
+    "secondary": "DEFAULT_SECONDARY_WEAPON",
+    "melee": "DEFAULT_MELEE_WEAPON",
+    "gadget": "DEFAULT_GADGET_WEAPON",
+    "armor": "DEFAULT_ARMOR_WEAPON",
+}
 
 DEFAULT_SETTINGS = {
     "DEFAULT_LANGUAGE_CODE": "ZH-CN",
     "PRIMARY_WEAPON_SLOTS": "1",
     "SECONDARY_WEAPON_SLOTS": "1",
+    "MELEE_WEAPON_SLOTS": "1",
     "GADGET_SLOTS": "2",
+    "DEFAULT_PRIMARY_WEAPON": "m4",
+    "DEFAULT_SECONDARY_WEAPON": "m1911",
+    "DEFAULT_MELEE_WEAPON": "silencefd",
+    "DEFAULT_GADGET_WEAPON": "mk2_grenade",
+    "DEFAULT_ARMOR_WEAPON": "",
     "STARTING_POINTS": "1000",
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
@@ -31,6 +67,13 @@ DEFAULT_SETTINGS = {
     "ASSIST_WINDOW_SECONDS": "3",
     "MATCH_ASSIST_WEIGHT": "0.5",
     "MATCH_TK_WEIGHT": "1.5",
+    "XP_PER_KILL": "5",
+    "XP_PER_LEVEL": "100",
+    "MAX_LEVEL": "100",
+    "XP_WIN_BONUS_PERCENT": "20",
+    "XP_MVP_PER_TEAMMATE": "10",
+    # 兼容旧键（已弃用，请用 XP_MVP_PER_TEAMMATE）
+    "XP_MVP_BONUS": "10",
     # 兼容旧键：若仍存在则忽略，以 MATCH_MONEY_PER_KILL 为准
     "MATCH_MONEY_PER_KD": "100",
 }
@@ -40,48 +83,360 @@ DEFAULT_MAPS = {
     "maps": [],
 }
 
-DEFAULT_WEAPONS = {
-    "_comment": "起始 1000 可买普通主+副；击杀 +50 攒点。MP5/RPG 为副武器。",
-    "weapons": [
-        {"id": "mp5a5", "display_name": "HK MP5-A5 冲锋枪", "item": "trenbankai:mp5a5", "cost": 500, "type": "secondary", "extras": {"trenbankai:mp5a5_mag": 9}, "ammo_scoreboard": "mp5a5", "default_ammo": 30},
-        {"id": "aks74u", "display_name": "AKS-74U 短突击步枪", "item": "trenbankai:aks74u", "cost": 550, "type": "primary", "extras": {"trenbankai:ak74_mag": 6}, "ammo_scoreboard": "aks74u", "default_ammo": 30},
-        {"id": "m4a1", "display_name": "M4A1 卡宾枪", "item": "trenbankai:m4a1", "cost": 650, "type": "primary", "extras": {"trenbankai:m4a1_mag": 6}, "ammo_scoreboard": "m4a1", "default_ammo": 30},
-        {"id": "ak74", "display_name": "AK-74 突击步枪", "item": "trenbankai:ak74", "cost": 650, "type": "primary", "extras": {"trenbankai:ak74_mag": 6}, "ammo_scoreboard": "ak74", "default_ammo": 30},
-        {"id": "ak12", "display_name": "AK-12 突击步枪", "item": "trenbankai:ak12", "cost": 700, "type": "primary", "extras": {"trenbankai:ak12_mag": 6}, "ammo_scoreboard": "ak12", "default_ammo": 30},
-        {"id": "mossberg", "display_name": "莫斯伯格 500 霰弹枪", "item": "trenbankai:mossberg", "cost": 700, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 36}, "ammo_scoreboard": "mossberg", "default_ammo": 6},
-        {"id": "shield", "display_name": "盾牌", "item": "minecraft:shield", "cost": 700, "type": "primary"},
-        {"id": "ak47", "display_name": "AK-47 突击步枪", "item": "trenbankai:ak47", "cost": 900, "type": "primary", "extras": {"trenbankai:ak47_mag": 6}, "ammo_scoreboard": "ak47", "default_ammo": 30},
-        {"id": "akm", "display_name": "AKM 突击步枪", "item": "trenbankai:akm", "cost": 900, "type": "primary", "extras": {"trenbankai:akm_mag": 6}, "ammo_scoreboard": "akm", "default_ammo": 30},
-        {"id": "m1014", "display_name": "M1014 霰弹枪", "item": "trenbankai:m1014", "cost": 1000, "type": "primary", "extras": {"trenbankai:bullet_12gauge": 42}, "ammo_scoreboard": "m1014", "default_ammo": 7},
-        {"id": "parafal", "display_name": "ParaFAL 战斗步枪", "item": "trenbankai:parafal", "cost": 1050, "type": "primary", "extras": {"trenbankai:fnfal_mag": 6}, "ammo_scoreboard": "parafal", "default_ammo": 20},
-        {"id": "fnfal", "display_name": "FN FAL 战斗步枪", "item": "trenbankai:fnfal", "cost": 1150, "type": "primary", "extras": {"trenbankai:fnfal_mag": 6}, "ammo_scoreboard": "fnfal", "default_ammo": 20},
-        {"id": "m249", "display_name": "M249 轻机枪", "item": "trenbankai:m249", "cost": 1300, "type": "primary", "extras": {"trenbankai:m249_mag": 3}, "ammo_scoreboard": "m249", "default_ammo": 200},
-        {"id": "awp", "display_name": "AWP 狙击步枪", "item": "trenbankai:awp", "cost": 1450, "type": "primary", "extras": {"trenbankai:awp_mag": 6}, "ammo_scoreboard": "awp", "default_ammo": 10},
-        {"id": "rpg7", "display_name": "RPG-7 火箭筒", "item": "trenbankai:rpg7", "cost": 1500, "type": "secondary", "extras": {"trenbankai:rpg7_rocket": 6}, "ammo_scoreboard": "rpg7", "default_ammo": 1},
-        {"id": "glock17", "display_name": "格洛克 17", "item": "trenbankai:glock17", "cost": 300, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock17", "default_ammo": 17},
-        {"id": "netherite_sword", "display_name": "下界合金剑", "item": "minecraft:netherite_sword", "cost": 100, "type": "secondary"},
-        {"id": "glock18", "display_name": "格洛克 18c", "item": "trenbankai:glock18", "cost": 550, "type": "secondary", "extras": {"trenbankai:glock_mag": 6}, "ammo_scoreboard": "glock18", "default_ammo": 17},
-        {"id": "deagle", "display_name": "沙漠之鹰", "item": "trenbankai:deagle", "cost": 800, "type": "secondary", "extras": {"trenbankai:deagle_mag": 6}, "ammo_scoreboard": "deagle", "default_ammo": 10},
-        {"id": "iron_armor", "display_name": "铁甲全套", "item": "minecraft:iron_helmet", "cost": 500, "type": "armor", "extras": {"minecraft:iron_helmet": 1, "minecraft:iron_chestplate": 1, "minecraft:iron_leggings": 1, "minecraft:iron_boots": 1}},
-        {"id": "flare", "display_name": "信号弹", "item": "trenbankai:flare", "cost": 50, "type": "gadget", "amount": 2},
-        {"id": "m84_grenade", "display_name": "M84 闪光弹", "item": "trenbankai:m84_grenade", "cost": 70, "type": "gadget"},
-        {"id": "mk2_grenade", "display_name": "Mk 2 手榴弹", "item": "trenbankai:mk2_grenade", "cost": 90, "type": "gadget"},
-        {"id": "l83a1_grenade", "display_name": "L83A1 手榴弹", "item": "trenbankai:l83a1_grenade", "cost": 90, "type": "gadget"},
-        {"id": "landmine", "display_name": "地雷", "item": "trenbankai:landmine_item", "cost": 110, "type": "gadget"},
-    ],
-}
+DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛选；unlock_level=军械库解锁等级。',
+ 'weapons': [{'id': 'm4',
+              'display_name': 'M4',
+              'item': 'arc:m4',
+              'cost': 650,
+              'type': 'primary',
+              'ammo_scoreboard': 'm4Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 0},
+             {'id': 'scarl',
+              'display_name': '改装型 FN SCAR-L',
+              'item': 'arc:scarl',
+              'cost': 700,
+              'type': 'primary',
+              'ammo_scoreboard': 'scarlAmmo',
+              'default_ammo': 25,
+              'category': 'assault_rifle',
+              'unlock_level': 8},
+             {'id': 'qbz95',
+              'display_name': 'QBZ-95',
+              'item': 'arc:qbz95',
+              'cost': 700,
+              'type': 'primary',
+              'ammo_scoreboard': 'qbz95Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 10},
+             {'id': 'qbz191',
+              'display_name': 'QBZ191',
+              'item': 'arc:qbz191',
+              'cost': 720,
+              'type': 'primary',
+              'ammo_scoreboard': 'qbz191Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 20},
+             {'id': 'sar80',
+              'display_name': 'SAR-80',
+              'item': 'arc:sar80',
+              'cost': 720,
+              'type': 'primary',
+              'ammo_scoreboard': 'sar80Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 20},
+             {'id': 'ak12',
+              'display_name': 'AK-12',
+              'item': 'arc:ak12',
+              'cost': 750,
+              'type': 'primary',
+              'ammo_scoreboard': 'ak12Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 20},
+             {'id': 'fp6',
+              'display_name': 'FP6',
+              'item': 'arc:fp6',
+              'cost': 700,
+              'type': 'primary',
+              'ammo_scoreboard': 'fp6Ammo',
+              'default_ammo': 6,
+              'category': 'shotgun',
+              'unlock_level': 5},
+             {'id': 'ak47',
+              'display_name': 'AK-47',
+              'item': 'arc:ak47',
+              'cost': 800,
+              'type': 'primary',
+              'ammo_scoreboard': 'ak47Ammo',
+              'default_ammo': 30,
+              'category': 'assault_rifle',
+              'unlock_level': 25},
+             {'id': 'spas12',
+              'display_name': '弗兰基 SPAS-12',
+              'item': 'arc:spas12',
+              'cost': 850,
+              'type': 'primary',
+              'ammo_scoreboard': 'spas12Ammo',
+              'default_ammo': 8,
+              'category': 'shotgun',
+              'unlock_level': 15},
+             {'id': 'scarh',
+              'display_name': 'FN SCAR-H',
+              'item': 'arc:scarh',
+              'cost': 900,
+              'type': 'primary',
+              'ammo_scoreboard': 'scarhAmmo',
+              'default_ammo': 20,
+              'category': 'assault_rifle',
+              'unlock_level': 30},
+             {'id': 'saiga308',
+              'display_name': 'SAIGA-308',
+              'item': 'arc:saiga308',
+              'cost': 900,
+              'type': 'primary',
+              'ammo_scoreboard': 'saiga308Ammo',
+              'default_ammo': 8,
+              'category': 'shotgun',
+              'unlock_level': 25},
+             {'id': 'rpk74',
+              'display_name': 'RPK-74',
+              'item': 'arc:rpk74',
+              'cost': 950,
+              'type': 'primary',
+              'ammo_scoreboard': 'rpk74Ammo',
+              'default_ammo': 45,
+              'category': 'lmg',
+              'unlock_level': 30},
+             {'id': 'aa12',
+              'display_name': 'AA-12',
+              'item': 'arc:aa12',
+              'cost': 1000,
+              'type': 'primary',
+              'ammo_scoreboard': 'aa12Ammo',
+              'default_ammo': 20,
+              'category': 'shotgun',
+              'unlock_level': 40},
+             {'id': 'hcar',
+              'display_name': 'HCAR',
+              'item': 'arc:hcar',
+              'cost': 1000,
+              'type': 'primary',
+              'ammo_scoreboard': 'hcarAmmo',
+              'default_ammo': 20,
+              'category': 'assault_rifle',
+              'unlock_level': 40},
+             {'id': 'qbb95',
+              'display_name': 'QBB95',
+              'item': 'arc:qbb95',
+              'cost': 1100,
+              'type': 'primary',
+              'ammo_scoreboard': 'qbb95Ammo',
+              'default_ammo': 60,
+              'category': 'lmg',
+              'unlock_level': 50},
+             {'id': 'ultraleggero',
+              'display_name': '贝瑞塔 Ultraleggero',
+              'item': 'arc:ultraleggero',
+              'cost': 1200,
+              'type': 'primary',
+              'ammo_scoreboard': 'ultraleggeroAmmo',
+              'default_ammo': 2,
+              'category': 'shotgun',
+              'unlock_level': 50},
+             {'id': 'svch',
+              'display_name': 'SVCh',
+              'item': 'arc:svch',
+              'cost': 1200,
+              'type': 'primary',
+              'ammo_scoreboard': 'svchAmmo',
+              'default_ammo': 10,
+              'category': 'sniper',
+              'unlock_level': 10},
+             {'id': 'm249',
+              'display_name': 'M249',
+              'item': 'arc:m249',
+              'cost': 1300,
+              'type': 'primary',
+              'ammo_scoreboard': 'm249Ammo',
+              'default_ammo': 75,
+              'category': 'lmg',
+              'unlock_level': 60},
+             {'id': 'minimi',
+              'display_name': 'FN 米尼米',
+              'item': 'arc:minimi',
+              'cost': 1300,
+              'type': 'primary',
+              'ammo_scoreboard': 'minimiAmmo',
+              'default_ammo': 75,
+              'category': 'lmg',
+              'unlock_level': 60},
+             {'id': 'mrad',
+              'display_name': '巴雷特 MRAD',
+              'item': 'arc:mrad',
+              'cost': 1400,
+              'type': 'primary',
+              'ammo_scoreboard': 'mradAmmo',
+              'default_ammo': 7,
+              'category': 'sniper',
+              'unlock_level': 70},
+             {'id': 'vshk',
+              'display_name': 'VSHk',
+              'item': 'arc:vshk',
+              'cost': 1450,
+              'type': 'primary',
+              'ammo_scoreboard': 'vshkAmmo',
+              'default_ammo': 5,
+              'category': 'sniper',
+              'unlock_level': 80},
+             {'id': 'gm6_lynx',
+              'display_name': 'GM6 山猫',
+              'item': 'arc:gm6_lynx',
+              'cost': 1500,
+              'type': 'primary',
+              'ammo_scoreboard': 'gm6_lynxAmmo',
+              'default_ammo': 5,
+              'category': 'sniper',
+              'unlock_level': 90},
+             {'id': 'shield',
+              'display_name': '盾牌',
+              'item': 'minecraft:shield',
+              'cost': 700,
+              'type': 'primary',
+              'category': 'shield',
+              'unlock_level': 10},
+             {'id': 'm1911',
+              'display_name': 'M1911',
+              'item': 'arc:m1911',
+              'cost': 250,
+              'type': 'secondary',
+              'ammo_scoreboard': 'm1911Ammo',
+              'default_ammo': 7,
+              'category': 'pistol',
+              'unlock_level': 0},
+             {'id': 'glock17',
+              'display_name': '格洛克 17',
+              'item': 'arc:glock17',
+              'cost': 300,
+              'type': 'secondary',
+              'ammo_scoreboard': 'glock17Ammo',
+              'default_ammo': 18,
+              'category': 'pistol',
+              'unlock_level': 2},
+             {'id': 'pdp',
+              'display_name': '瓦尔特 PDP',
+              'item': 'arc:pdp',
+              'cost': 320,
+              'type': 'secondary',
+              'ammo_scoreboard': 'pdpAmmo',
+              'default_ammo': 18,
+              'category': 'pistol',
+              'unlock_level': 5},
+             {'id': 'mpl1',
+              'display_name': '列别捷夫战术 MPL1',
+              'item': 'arc:mpl1',
+              'cost': 350,
+              'type': 'secondary',
+              'ammo_scoreboard': 'mpl1Ammo',
+              'default_ammo': 18,
+              'category': 'pistol',
+              'unlock_level': 8},
+             {'id': 'pp2000',
+              'display_name': 'PP-2000',
+              'item': 'arc:pp2000',
+              'cost': 450,
+              'type': 'secondary',
+              'ammo_scoreboard': 'pp2000Ammo',
+              'default_ammo': 20,
+              'category': 'smg',
+              'unlock_level': 4},
+             {'id': 'pmx',
+              'display_name': '贝瑞塔 PMX',
+              'item': 'arc:pmx',
+              'cost': 480,
+              'type': 'secondary',
+              'ammo_scoreboard': 'pmxAmmo',
+              'default_ammo': 20,
+              'category': 'smg',
+              'unlock_level': 10},
+             {'id': 'mp5',
+              'display_name': '黑克勒-科赫 MP5',
+              'item': 'arc:mp5',
+              'cost': 500,
+              'type': 'secondary',
+              'ammo_scoreboard': 'mp5Ammo',
+              'default_ammo': 30,
+              'category': 'smg',
+              'unlock_level': 15},
+             {'id': 'ump45',
+              'display_name': '黑克勒-科赫 UMP-45',
+              'item': 'arc:ump45',
+              'cost': 520,
+              'type': 'secondary',
+              'ammo_scoreboard': 'ump45Ammo',
+              'default_ammo': 30,
+              'category': 'smg',
+              'unlock_level': 20},
+             {'id': 'k7',
+              'display_name': '大宇电信 K7',
+              'item': 'arc:k7',
+              'cost': 550,
+              'type': 'secondary',
+              'ammo_scoreboard': 'k7Ammo',
+              'default_ammo': 30,
+              'category': 'smg',
+              'unlock_level': 25},
+             {'id': 'p90',
+              'display_name': 'P90',
+              'item': 'arc:p90',
+              'cost': 600,
+              'type': 'secondary',
+              'ammo_scoreboard': 'p90Ammo',
+              'default_ammo': 50,
+              'category': 'smg',
+              'unlock_level': 30},
+             {'id': 'silencefd',
+              'display_name': '战术匕首',
+              'item': 'arc:silencefd',
+              'cost': 100,
+              'type': 'melee',
+              'category': 'knife',
+              'unlock_level': 0},
+             {'id': 'arc_armor',
+              'display_name': '弧光防弹套装',
+              'item': 'arc:6b47_helmet',
+              'cost': 500,
+              'type': 'armor',
+              'extras': {'arc:6b47_helmet': 1, 'arc:6b45_vest': 1, 'arc:emr_suit': 1, 'arc:balaclava': 1},
+              'category': 'armor',
+              'unlock_level': 15},
+             {'id': 'm84_grenade',
+              'display_name': 'M84 闪光弹',
+              'item': 'arc:m84_grenade',
+              'cost': 70,
+              'type': 'gadget',
+              'category': 'flash',
+              'unlock_level': 2},
+             {'id': 'mk2_grenade',
+              'display_name': 'Mk 2 破片手雷',
+              'item': 'arc:mk2_grenade',
+              'cost': 90,
+              'type': 'gadget',
+              'category': 'frag',
+              'unlock_level': 0},
+             {'id': 'l83a1_grenade',
+              'display_name': 'L83A1 烟雾弹',
+              'item': 'arc:l83a1_grenade',
+              'cost': 90,
+              'type': 'gadget',
+              'category': 'smoke',
+              'unlock_level': 4},
+             {'id': 'landmine',
+              'display_name': '地雷',
+              'item': 'arc:landmine_item',
+              'cost': 110,
+              'type': 'gadget',
+              'category': 'mine',
+              'unlock_level': 8}]}
 
 
-def slot_layout(primary: int, secondary: int, gadget: int) -> Dict[str, Any]:
+def slot_layout(primary: int, secondary: int, melee: int, gadget: int) -> Dict[str, Any]:
     primary = max(0, int(primary))
     secondary = max(0, int(secondary))
+    melee = max(0, int(melee))
     gadget = max(0, int(gadget))
     p0, p1 = 0, primary
     s0, s1 = p1, p1 + secondary
-    g0, g1 = s1, s1 + gadget
+    m0, m1 = s1, s1 + melee
+    g0, g1 = m1, m1 + gadget
     return {
         "primary": (p0, p1),
         "secondary": (s0, s1),
+        "melee": (m0, m1),
         "gadget": (g0, g1),
         "reserved": g1,
     }
@@ -162,6 +517,11 @@ def _normalize_mode(raw: Dict[str, Any]) -> Dict[str, Any]:
     from endstone_arc_shooter_game.loadout import normalize_acquire_key
 
     acquire = normalize_acquire_key(raw.get("weapon_acquire"))
+    # TDM 固定军械库（暂不用商店）；其它模式未配置时默认商店
+    if mode == "tdm":
+        acquire = "armory"
+    elif raw.get("weapon_acquire") is None or str(raw.get("weapon_acquire") or "").strip() == "":
+        acquire = "shop"
     out: Dict[str, Any] = {
         "mode": mode,
         "max_players_per_team": max(1, int(raw.get("max_players_per_team") or 8)),
@@ -176,6 +536,7 @@ def _normalize_mode(raw: Dict[str, Any]) -> Dict[str, Any]:
         out["preset_loadout"] = {
             "primary": str(preset.get("primary") or "").strip() or None,
             "secondary": str(preset.get("secondary") or "").strip() or None,
+            "melee": str(preset.get("melee") or "").strip() or None,
             "armor": str(preset.get("armor") or "").strip() or None,
             "gadgets": [
                 str(g).strip()
@@ -542,7 +903,9 @@ def build_runtime_map_cfg(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[s
         "max_players_per_team": int(mode_cfg.get("max_players_per_team") or 8),
         "target_score": int(mode_cfg.get("target_score") or 50),
         "match_time_minutes": max(1, int(mode_cfg.get("match_time_minutes") or 5)),
-        "weapon_acquire": mode_cfg.get("weapon_acquire") or "shop",
+        "weapon_acquire": "armory" if mode_key == "tdm" else (
+            mode_cfg.get("weapon_acquire") or "shop"
+        ),
         "preset_loadout": mode_cfg.get("preset_loadout"),
         "random_gadget_count": mode_cfg.get("random_gadget_count"),
         "random_include_armor": mode_cfg.get("random_include_armor"),
@@ -562,6 +925,15 @@ def validate_weapon(raw: Dict[str, Any]) -> List[str]:
     wtype = str(raw.get("type") or "").strip().lower()
     if wtype not in WEAPON_TYPES:
         errors.append(f"type must be one of {WEAPON_TYPES}")
+    category = str(raw.get("category") or "").strip().lower()
+    if category and category not in WEAPON_CATEGORIES:
+        errors.append(f"category must be one of {WEAPON_CATEGORIES}")
+    if raw.get("unlock_level") is not None:
+        try:
+            if int(raw.get("unlock_level")) < 0:
+                errors.append("unlock_level must be >= 0")
+        except (TypeError, ValueError):
+            errors.append("unlock_level must be an integer")
     extras = raw.get("extras", {})
     if extras is None:
         extras = {}
@@ -603,6 +975,8 @@ def normalize_weapon(raw: Dict[str, Any]) -> Dict[str, Any]:
         "item": str(raw.get("item")).strip(),
         "cost": max(0, int(raw.get("cost") or 0)),
         "type": str(raw.get("type")).strip().lower(),
+        "category": str(raw.get("category") or "").strip().lower(),
+        "unlock_level": max(0, int(raw.get("unlock_level") or 0)),
         "data": int(raw.get("data") or 0),
         "amount": max(1, int(raw.get("amount") or 1)),
         "extras": extras,
@@ -786,8 +1160,15 @@ class ConfigStore:
         return slot_layout(
             self.settings.GetSettingInt("PRIMARY_WEAPON_SLOTS", 1),
             self.settings.GetSettingInt("SECONDARY_WEAPON_SLOTS", 1),
+            self.settings.GetSettingInt("MELEE_WEAPON_SLOTS", 1),
             self.settings.GetSettingInt("GADGET_SLOTS", 2),
         )
+
+    def default_weapons(self) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for wtype, key in DEFAULT_WEAPON_SETTING_KEYS.items():
+            out[wtype] = str(self.settings.GetSetting(key) or "").strip()
+        return out
 
     def starting_points(self) -> int:
         return max(0, self.settings.GetSettingInt("STARTING_POINTS", 1000))
@@ -831,9 +1212,46 @@ class ConfigStore:
     def match_tk_weight(self) -> float:
         return max(0.0, self.settings.GetSettingFloat("MATCH_TK_WEIGHT", 1.5))
 
+    def xp_per_kill(self) -> int:
+        return max(0, self.settings.GetSettingInt("XP_PER_KILL", 5))
+
+    def xp_per_level(self) -> int:
+        return max(1, self.settings.GetSettingInt("XP_PER_LEVEL", 100))
+
+    def max_level(self) -> int:
+        return max(1, self.settings.GetSettingInt("MAX_LEVEL", 100))
+
+    def xp_win_bonus_percent(self) -> int:
+        return max(0, self.settings.GetSettingInt("XP_WIN_BONUS_PERCENT", 20))
+
+    def xp_mvp_per_teammate(self) -> int:
+        """MVP 额外 XP = 队伍人数 × 本值。"""
+        return max(0, self.settings.GetSettingInt("XP_MVP_PER_TEAMMATE", 10))
+
     def match_money_per_kd(self) -> int:
         """已弃用，保留以免旧调用报错；请用 match_money_per_kill。"""
         return self.match_money_per_kill()
 
     def weapons_of_type(self, weapon_type: str) -> List[Dict[str, Any]]:
         return [w for w in self.weapons.values() if w["type"] == weapon_type]
+
+    def weapons_of_category(self, weapon_type: str, category: str) -> List[Dict[str, Any]]:
+        cat = str(category or "").strip().lower()
+        return [
+            w
+            for w in self.weapons.values()
+            if w["type"] == weapon_type and str(w.get("category") or "") == cat
+        ]
+
+    def categories_for_type(self, weapon_type: str) -> List[str]:
+        preferred = list(CATEGORIES_BY_TYPE.get(weapon_type, ()))
+        present = {
+            str(w.get("category") or "")
+            for w in self.weapons.values()
+            if w["type"] == weapon_type and w.get("category")
+        }
+        ordered = [c for c in preferred if c in present]
+        for c in sorted(present):
+            if c not in ordered:
+                ordered.append(c)
+        return ordered
