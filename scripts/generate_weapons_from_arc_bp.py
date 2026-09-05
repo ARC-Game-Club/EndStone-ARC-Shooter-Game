@@ -21,18 +21,12 @@ LANG = BP / "texts" / "zh_CN.lang"
 WEAPONS_JSON = ROOT / "plugins" / "ARCShooterGame" / "weapons.json"
 AMMO_REF = ROOT / "plugins" / "ARCShooterGame" / "aplok_ammo.json"
 
-# primary / secondary 分类（与 BP scripts/system/pvpGun.js 一致；手枪+冲锋枪作副武）
+# primary / secondary 分类（手枪作副武；冲锋枪为主武）
 SECONDARY_IDS = {
     "m1911",
     "glock17",
     "pdp",
     "mpl1",
-    "pmx",
-    "mp5",
-    "ump45",
-    "k7",
-    "p90",
-    "pp2000",
 }
 
 # 价格：起始 1000 可买普通主+副；贵枪需攒击杀点
@@ -42,7 +36,7 @@ COSTS: dict[str, int] = {
     "glock17": 300,
     "pdp": 320,
     "mpl1": 350,
-    # SMGs (secondary)
+    # SMGs (primary)
     "pp2000": 450,
     "pmx": 480,
     "mp5": 500,
@@ -102,18 +96,18 @@ PRIMARY_ORDER = [
     "mrad",
     "vshk",
     "gm6_lynx",
-]
-SECONDARY_ORDER = [
-    "m1911",
-    "glock17",
-    "pdp",
-    "mpl1",
     "pp2000",
     "pmx",
     "mp5",
     "ump45",
     "k7",
     "p90",
+]
+SECONDARY_ORDER = [
+    "m1911",
+    "glock17",
+    "pdp",
+    "mpl1",
 ]
 
 # category 筛选 + 军械库解锁等级（与计划表一致）
@@ -134,9 +128,9 @@ CATEGORIES: dict[str, str] = {
     "spas12": "shotgun",
     "aa12": "shotgun",
     "ultraleggero": "shotgun",
-    "saiga308": "sniper",
-    "hcar": "sniper",
-    "svch": "sniper",
+    "saiga308": "dmr",
+    "hcar": "dmr",
+    "svch": "dmr",
     "mrad": "sniper",
     "vshk": "sniper",
     "gm6_lynx": "sniper",

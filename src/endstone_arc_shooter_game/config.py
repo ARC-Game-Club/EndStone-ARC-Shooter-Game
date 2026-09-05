@@ -18,6 +18,7 @@ WEAPON_CATEGORIES = (
     "pistol",
     "shotgun",
     "lmg",
+    "dmr",
     "sniper",
     "shield",
     "knife",
@@ -25,15 +26,15 @@ WEAPON_CATEGORIES = (
     "flash",
     "smoke",
     "mine",
-    "armor",
 )
 # 槽位 type → 常见分类顺序（军械库 / 商店二级菜单）
+# 注意：armor 类别已移除（2026-09-05）— 护甲由插件按队伍颜色自动发放，
+# 不再允许在军械库 / 商店中配置。
 CATEGORIES_BY_TYPE = {
-    "primary": ("assault_rifle", "smg", "shotgun", "lmg", "sniper", "shield"),
-    "secondary": ("pistol", "smg"),
+    "primary": ("assault_rifle", "smg", "shotgun", "lmg", "dmr", "sniper", "shield"),
+    "secondary": ("pistol",),
     "melee": ("knife",),
     "gadget": ("frag", "flash", "smoke", "mine"),
-    "armor": ("armor",),
 }
 DEFAULT_WEAPON_SETTING_KEYS = {
     "primary": "DEFAULT_PRIMARY_WEAPON",
@@ -57,7 +58,11 @@ DEFAULT_SETTINGS = {
     "STARTING_POINTS": "1000",
     "KILL_REWARD_POINTS": "50",
     "LOBBY_TIMEOUT_SECONDS": "900",
-    "BUY_TIME_SECONDS": "20",
+    # 开局准备时间（购买/换装窗）：全部玩家在开局时进入准备状态（移速 0 + 无敌 + 弧光币）。
+    "PREPARATION_TIME_SECONDS": "20",
+    # 复活后无敌时间：仅作用于 STATE_PLAYING 中被复活的玩家（无敌 + 弧光币；不冻结移速）。
+    # 设为 0 表示关闭复活无敌窗（玩家复活即直接进入战斗）。
+    "RESPAWN_INVULNERABLE_SECONDS": "3",
     "START_COUNTDOWN_SECONDS": "5",
     "MATCH_TIME_SECONDS": "300",
     "WIN_GUILD_CONTRIBUTION_PER_KD": "10",
@@ -77,6 +82,11 @@ DEFAULT_SETTINGS = {
     "XP_MVP_BONUS": "10",
     # 兼容旧键：若仍存在则忽略，以 MATCH_MONEY_PER_KILL 为准
     "MATCH_MONEY_PER_KD": "100",
+    # === 2026-09-05 队伍默认护甲（按队伍颜色自动发） ===
+    # 格式：JSON 字符串 {"helmet": "<item_id>", "chestplate": "<item_id>", "leggings": "<item_id>"}
+    # OP 改 settings.yml 即可调整每队默认护甲，无需改代码。
+    "TEAM_A_DEFAULT_ARMOR": '{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}',
+    "TEAM_B_DEFAULT_ARMOR": '{"helmet":"arc:6b47_helmet_blue","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_blue"}',
 }
 
 DEFAULT_MAPS = {
@@ -182,7 +192,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'type': 'primary',
               'ammo_scoreboard': 'saiga308Ammo',
               'default_ammo': 8,
-              'category': 'shotgun',
+              'category': 'dmr',
               'unlock_level': 25},
              {'id': 'rpk74',
               'display_name': 'RPK-74',
@@ -209,7 +219,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'type': 'primary',
               'ammo_scoreboard': 'hcarAmmo',
               'default_ammo': 20,
-              'category': 'assault_rifle',
+              'category': 'dmr',
               'unlock_level': 40},
              {'id': 'qbb95',
               'display_name': 'QBB95',
@@ -236,7 +246,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'type': 'primary',
               'ammo_scoreboard': 'svchAmmo',
               'default_ammo': 10,
-              'category': 'sniper',
+              'category': 'dmr',
               'unlock_level': 10},
              {'id': 'm249',
               'display_name': 'M249',
@@ -330,7 +340,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': 'PP-2000',
               'item': 'arc:pp2000',
               'cost': 450,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'pp2000Ammo',
               'default_ammo': 20,
               'category': 'smg',
@@ -339,7 +349,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': '贝瑞塔 PMX',
               'item': 'arc:pmx',
               'cost': 480,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'pmxAmmo',
               'default_ammo': 20,
               'category': 'smg',
@@ -348,7 +358,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': '黑克勒-科赫 MP5',
               'item': 'arc:mp5',
               'cost': 500,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'mp5Ammo',
               'default_ammo': 30,
               'category': 'smg',
@@ -357,7 +367,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': '黑克勒-科赫 UMP-45',
               'item': 'arc:ump45',
               'cost': 520,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'ump45Ammo',
               'default_ammo': 30,
               'category': 'smg',
@@ -366,7 +376,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': '大宇电信 K7',
               'item': 'arc:k7',
               'cost': 550,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'k7Ammo',
               'default_ammo': 30,
               'category': 'smg',
@@ -375,7 +385,7 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'display_name': 'P90',
               'item': 'arc:p90',
               'cost': 600,
-              'type': 'secondary',
+              'type': 'primary',
               'ammo_scoreboard': 'p90Ammo',
               'default_ammo': 50,
               'category': 'smg',
@@ -1071,6 +1081,19 @@ class SettingManager:
 
     def _ensure_defaults(self):
         changed = False
+        # 旧键 BUY_TIME_SECONDS → 新键 PREPARATION_TIME_SECONDS 自动迁移：
+        # 仅当用户写了旧键、新键还没被用户显式设置时，把旧值搬过去。
+        legacy_buy = self.setting_dict.get("BUY_TIME_SECONDS", "")
+        new_prep = self.setting_dict.get("PREPARATION_TIME_SECONDS", "")
+        if legacy_buy and not new_prep:
+            self.setting_dict["PREPARATION_TIME_SECONDS"] = legacy_buy
+            changed = True
+        # 旧键 RESPAWN_PREPARATION_TIME_SECONDS → RESPAWN_INVULNERABLE_SECONDS 自动迁移。
+        legacy_resp = self.setting_dict.get("RESPAWN_PREPARATION_TIME_SECONDS", "")
+        new_resp = self.setting_dict.get("RESPAWN_INVULNERABLE_SECONDS", "")
+        if legacy_resp and not new_resp:
+            self.setting_dict["RESPAWN_INVULNERABLE_SECONDS"] = legacy_resp
+            changed = True
         for key, value in DEFAULT_SETTINGS.items():
             if key not in self.setting_dict or self.setting_dict[key] == "":
                 self.setting_dict[key] = value
@@ -1133,6 +1156,38 @@ class ConfigStore:
                 fn(message)
                 return
         print(f"[{level.upper()}] {message}")
+
+    def default_team_armor(self, team_id):
+        """Return default armor {helmet, chestplate, leggings} item ids for a team.
+        Read JSON from settings.yml (TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR).
+        Fallback to hardcoded defaults if missing/parse-fails.
+        """
+        # 延迟导入避免 config<->session 循环引用
+        from endstone_arc_shooter_game.session import TEAM_A, TEAM_B
+        import json as _json
+        if team_id == TEAM_A:
+            raw = self.settings.GetSetting('TEAM_A_DEFAULT_ARMOR') or ''
+        elif team_id == TEAM_B:
+            raw = self.settings.GetSetting('TEAM_B_DEFAULT_ARMOR') or ''
+        else:
+            return {}
+        if raw:
+            try:
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    return {
+                        'helmet': str(parsed.get('helmet') or '').strip(),
+                        'chestplate': str(parsed.get('chestplate') or '').strip(),
+                        'leggings': str(parsed.get('leggings') or '').strip(),
+                    }
+            except Exception:
+                pass
+        # Fallback: 跟随 mod 原本的"原版绿色防弹衣 + 红/蓝头盔/迷彩服"
+        if team_id == TEAM_A:
+            return {'helmet': 'arc:6b47_helmet_red', 'chestplate': 'arc:6b45_vest', 'leggings': 'arc:emr_suit_red'}
+        if team_id == TEAM_B:
+            return {'helmet': 'arc:6b47_helmet_blue', 'chestplate': 'arc:6b45_vest', 'leggings': 'arc:emr_suit_blue'}
+        return {}
 
     def reload(self) -> None:
         from endstone_arc_shooter_game.map_db import MapDatabase
@@ -1243,8 +1298,24 @@ class ConfigStore:
     def lobby_timeout(self) -> int:
         return max(30, self.settings.GetSettingInt("LOBBY_TIMEOUT_SECONDS", 900))
 
-    def buy_time(self) -> int:
-        return max(0, self.settings.GetSettingInt("BUY_TIME_SECONDS", 20))
+    def preparation_time(self) -> int:
+        """开局准备时间秒数（购买/换装窗）。
+        兼容旧键 BUY_TIME_SECONDS：当 settings.yml 仍使用旧键且未写入
+        PREPARATION_TIME_SECONDS 时回退到旧值。
+        """
+        new_val = self.settings.GetSetting("PREPARATION_TIME_SECONDS")
+        if new_val is not None and str(new_val).strip() != "":
+            return max(0, int(float(new_val)))
+        legacy = self.settings.GetSetting("BUY_TIME_SECONDS")
+        if legacy is not None and str(legacy).strip() != "":
+            return max(0, int(float(legacy)))
+        return 20
+
+    def respawn_invuln_time(self) -> int:
+        """复活后无敌时间秒数（仅无敌 + 弧光币；不冻结移速）。0 表示关闭。"""
+        return max(
+            0, self.settings.GetSettingInt("RESPAWN_INVULNERABLE_SECONDS", 3)
+        )
 
     def start_countdown(self) -> int:
         """开赛前传送倒计时秒数（title 倒数）。"""

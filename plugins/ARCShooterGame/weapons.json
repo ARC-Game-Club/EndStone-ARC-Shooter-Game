@@ -4,7 +4,7 @@
     {
       "id": "m4",
       "display_name": "M4",
-      "item": "arc:m4",
+      "item": "blazik:m4",
       "cost": 650,
       "type": "primary",
       "ammo_scoreboard": "m4Ammo",
@@ -15,7 +15,7 @@
     {
       "id": "scarl",
       "display_name": "改装型 FN SCAR-L",
-      "item": "arc:scarl",
+      "item": "blazik:scarl",
       "cost": 700,
       "type": "primary",
       "ammo_scoreboard": "scarlAmmo",
@@ -26,7 +26,7 @@
     {
       "id": "qbz95",
       "display_name": "QBZ-95",
-      "item": "arc:qbz95",
+      "item": "blazik:qbz95",
       "cost": 700,
       "type": "primary",
       "ammo_scoreboard": "qbz95Ammo",
@@ -37,7 +37,7 @@
     {
       "id": "qbz191",
       "display_name": "QBZ191",
-      "item": "arc:qbz191",
+      "item": "blazik:qbz191",
       "cost": 720,
       "type": "primary",
       "ammo_scoreboard": "qbz191Ammo",
@@ -48,7 +48,7 @@
     {
       "id": "sar80",
       "display_name": "SAR-80",
-      "item": "arc:sar80",
+      "item": "blazik:sar80",
       "cost": 720,
       "type": "primary",
       "ammo_scoreboard": "sar80Ammo",
@@ -59,7 +59,7 @@
     {
       "id": "ak12",
       "display_name": "AK-12",
-      "item": "arc:ak12",
+      "item": "blazik:ak12",
       "cost": 750,
       "type": "primary",
       "ammo_scoreboard": "ak12Ammo",
@@ -70,7 +70,7 @@
     {
       "id": "fp6",
       "display_name": "FP6",
-      "item": "arc:fp6",
+      "item": "blazik:fp6",
       "cost": 700,
       "type": "primary",
       "ammo_scoreboard": "fp6Ammo",
@@ -81,7 +81,7 @@
     {
       "id": "ak47",
       "display_name": "AK-47",
-      "item": "arc:ak47",
+      "item": "blazik:ak47",
       "cost": 800,
       "type": "primary",
       "ammo_scoreboard": "ak47Ammo",
@@ -92,7 +92,7 @@
     {
       "id": "spas12",
       "display_name": "弗兰基 SPAS-12",
-      "item": "arc:spas12",
+      "item": "blazik:spas12",
       "cost": 850,
       "type": "primary",
       "ammo_scoreboard": "spas12Ammo",
@@ -103,7 +103,7 @@
     {
       "id": "scarh",
       "display_name": "FN SCAR-H",
-      "item": "arc:scarh",
+      "item": "blazik:scarh",
       "cost": 900,
       "type": "primary",
       "ammo_scoreboard": "scarhAmmo",
@@ -114,18 +114,18 @@
     {
       "id": "saiga308",
       "display_name": "SAIGA-308",
-      "item": "arc:saiga308",
+      "item": "blazik:saiga308",
       "cost": 900,
       "type": "primary",
       "ammo_scoreboard": "saiga308Ammo",
       "default_ammo": 8,
-      "category": "shotgun",
+      "category": "dmr",
       "unlock_level": 25
     },
     {
       "id": "rpk74",
       "display_name": "RPK-74",
-      "item": "arc:rpk74",
+      "item": "blazik:rpk74",
       "cost": 950,
       "type": "primary",
       "ammo_scoreboard": "rpk74Ammo",
@@ -136,7 +136,7 @@
     {
       "id": "aa12",
       "display_name": "AA-12",
-      "item": "arc:aa12",
+      "item": "blazik:aa12",
       "cost": 1000,
       "type": "primary",
       "ammo_scoreboard": "aa12Ammo",
@@ -147,18 +147,18 @@
     {
       "id": "hcar",
       "display_name": "HCAR",
-      "item": "arc:hcar",
+      "item": "blazik:hcar",
       "cost": 1000,
       "type": "primary",
       "ammo_scoreboard": "hcarAmmo",
       "default_ammo": 20,
-      "category": "assault_rifle",
+      "category": "dmr",
       "unlock_level": 40
     },
     {
       "id": "qbb95",
       "display_name": "QBB95",
-      "item": "arc:qbb95",
+      "item": "blazik:qbb95",
       "cost": 1100,
       "type": "primary",
       "ammo_scoreboard": "qbb95Ammo",
@@ -169,7 +169,7 @@
     {
       "id": "ultraleggero",
       "display_name": "贝瑞塔 Ultraleggero",
-      "item": "arc:ultraleggero",
+      "item": "blazik:ultraleggero",
       "cost": 1200,
       "type": "primary",
       "ammo_scoreboard": "ultraleggeroAmmo",
@@ -180,18 +180,18 @@
     {
       "id": "svch",
       "display_name": "SVCh",
-      "item": "arc:svch",
+      "item": "blazik:svch",
       "cost": 1200,
       "type": "primary",
       "ammo_scoreboard": "svchAmmo",
       "default_ammo": 10,
-      "category": "sniper",
+      "category": "dmr",
       "unlock_level": 10
     },
     {
       "id": "m249",
       "display_name": "M249",
-      "item": "arc:m249",
+      "item": "blazik:m249",
       "cost": 1300,
       "type": "primary",
       "ammo_scoreboard": "m249Ammo",
@@ -202,7 +202,7 @@
     {
       "id": "minimi",
       "display_name": "FN 米尼米",
-      "item": "arc:minimi",
+      "item": "blazik:minimi",
       "cost": 1300,
       "type": "primary",
       "ammo_scoreboard": "minimiAmmo",
@@ -213,7 +213,7 @@
     {
       "id": "mrad",
       "display_name": "巴雷特 MRAD",
-      "item": "arc:mrad",
+      "item": "blazik:mrad",
       "cost": 1400,
       "type": "primary",
       "ammo_scoreboard": "mradAmmo",
@@ -224,7 +224,7 @@
     {
       "id": "vshk",
       "display_name": "VSHk",
-      "item": "arc:vshk",
+      "item": "blazik:vshk",
       "cost": 1450,
       "type": "primary",
       "ammo_scoreboard": "vshkAmmo",
@@ -235,7 +235,7 @@
     {
       "id": "gm6_lynx",
       "display_name": "GM6 山猫",
-      "item": "arc:gm6_lynx",
+      "item": "blazik:gm6_lynx",
       "cost": 1500,
       "type": "primary",
       "ammo_scoreboard": "gm6_lynxAmmo",
@@ -255,7 +255,7 @@
     {
       "id": "m1911",
       "display_name": "M1911",
-      "item": "arc:m1911",
+      "item": "blazik:m1911",
       "cost": 250,
       "type": "secondary",
       "ammo_scoreboard": "m1911Ammo",
@@ -266,7 +266,7 @@
     {
       "id": "glock17",
       "display_name": "格洛克 17",
-      "item": "arc:glock17",
+      "item": "blazik:glock17",
       "cost": 300,
       "type": "secondary",
       "ammo_scoreboard": "glock17Ammo",
@@ -277,7 +277,7 @@
     {
       "id": "pdp",
       "display_name": "瓦尔特 PDP",
-      "item": "arc:pdp",
+      "item": "blazik:pdp",
       "cost": 320,
       "type": "secondary",
       "ammo_scoreboard": "pdpAmmo",
@@ -288,7 +288,7 @@
     {
       "id": "mpl1",
       "display_name": "列别捷夫战术 MPL1",
-      "item": "arc:mpl1",
+      "item": "blazik:mpl1",
       "cost": 350,
       "type": "secondary",
       "ammo_scoreboard": "mpl1Ammo",
@@ -299,9 +299,9 @@
     {
       "id": "pp2000",
       "display_name": "PP-2000",
-      "item": "arc:pp2000",
+      "item": "blazik:pp2000",
       "cost": 450,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "pp2000Ammo",
       "default_ammo": 20,
       "category": "smg",
@@ -310,9 +310,9 @@
     {
       "id": "pmx",
       "display_name": "贝瑞塔 PMX",
-      "item": "arc:pmx",
+      "item": "blazik:pmx",
       "cost": 480,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "pmxAmmo",
       "default_ammo": 20,
       "category": "smg",
@@ -321,9 +321,9 @@
     {
       "id": "mp5",
       "display_name": "黑克勒-科赫 MP5",
-      "item": "arc:mp5",
+      "item": "blazik:mp5",
       "cost": 500,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "mp5Ammo",
       "default_ammo": 30,
       "category": "smg",
@@ -332,9 +332,9 @@
     {
       "id": "ump45",
       "display_name": "黑克勒-科赫 UMP-45",
-      "item": "arc:ump45",
+      "item": "blazik:ump45",
       "cost": 520,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "ump45Ammo",
       "default_ammo": 30,
       "category": "smg",
@@ -343,9 +343,9 @@
     {
       "id": "k7",
       "display_name": "大宇电信 K7",
-      "item": "arc:k7",
+      "item": "blazik:k7",
       "cost": 550,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "k7Ammo",
       "default_ammo": 30,
       "category": "smg",
@@ -354,9 +354,9 @@
     {
       "id": "p90",
       "display_name": "P90",
-      "item": "arc:p90",
+      "item": "blazik:p90",
       "cost": 600,
-      "type": "secondary",
+      "type": "primary",
       "ammo_scoreboard": "p90Ammo",
       "default_ammo": 50,
       "category": "smg",
@@ -365,7 +365,7 @@
     {
       "id": "silencefd",
       "display_name": "战术匕首",
-      "item": "arc:silencefd",
+      "item": "df:silencefd",
       "cost": 100,
       "type": "melee",
       "category": "knife",
@@ -374,7 +374,7 @@
     {
       "id": "arc_armor",
       "display_name": "弧光防弹套装",
-      "item": "arc:6b47_helmet",
+      "item": "nova:6b47_helmet",
       "cost": 500,
       "type": "armor",
       "extras": {

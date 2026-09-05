@@ -123,10 +123,10 @@ _VANILLA_CMD_DIM = {
 ARC_COIN_ITEM = "arc:arc_coin"
 ARC_COIN_HOTBAR_SLOT = 8
 SHOP_DEBOUNCE_SECONDS = 0.2
-# 兜底；实际购买/换装无敌窗优先用 settings BUY_TIME_SECONDS
+# 兜底；实际准备时间窗优先用 settings PREPARATION_TIME_SECONDS / RESPAWN_INVULNERABLE_SECONDS
 SPAWN_PROTECT_SECONDS = 3
 MATCH_BUFF_DURATION_SECONDS = 1000000
-# 基岩版玩家默认行走速度；购买期设为 0，开局再恢复
+# 基岩版玩家默认行走速度；准备时间设为 0，对局开始时恢复
 DEFAULT_MOVEMENT_SPEED = 0.1
 TEAM_NAME_COLOR = {
     TEAM_A: "§c",
@@ -232,7 +232,10 @@ class ARCShooterGamePlugin(Plugin):
         self._pending_restore: set[str] = set()
         self._spawn_protect_until: Dict[str, float] = {}
         self._armory_edit_preset: Dict[str, int] = {}
-        self._buy_frozen: set[str] = set()
+        # 处于开局准备阶段（STATE_BUYING）内被冻结的玩家。
+        # 通过 attribute 命令设 minecraft:movement base=0；窗口结束自动恢复。
+        # 复活（STATE_PLAYING）的无敌窗不再冻结移速，玩家可自由跑位。
+        self._prep_frozen: set[str] = set()
         self._ff_warn_at: Dict[str, float] = {}
         self._tick_task = None
         self._fast_tick_task = None
@@ -706,8 +709,7 @@ class ARCShooterGamePlugin(Plugin):
         try:
             self._expire_purchase_windows()
             for lobby in list(self.lobbies.values()):
-                if lobby.state == STATE_BUYING:
-                    self._enforce_buy_freeze(lobby)
+                # 注：2026-09-05 取消 _enforce_preparation_freeze（让玩家准备时间自由跑）
                 if lobby.state in (STATE_BUYING, STATE_PLAYING, STATE_COUNTDOWN, STATE_LOBBY):
                     self._update_sneak_name_tags(lobby)
         except Exception as e:
@@ -832,10 +834,15 @@ class ARCShooterGamePlugin(Plugin):
             self._apply_team_name_tag(player, lobby)
             self._send_team_assign_title(player, lobby)
             if lobby.state == STATE_BUYING and strategy.uses_buy_phase:
-                self._set_buy_freeze(player)
+                # 中途加入开局准备窗：继承剩余时长（2026-09-05 取消冻结移速）
+                remaining = max(1, int(math.ceil(lobby.buy_remaining())))
+                self._apply_spawn_protect(player, duration=remaining)
             elif lobby.state == STATE_PLAYING:
                 self._apply_match_buffs(player)
-                self._apply_spawn_protect(player)
+                # 中途加入 STATE_PLAYING：按复活无敌时长开；不冻结移速
+                self._apply_spawn_protect(
+                    player, duration=self._respawn_invuln_window_seconds()
+                )
             self._show_match_menu(player, lobby)
             return
         count = lobby.player_count()
@@ -894,7 +901,7 @@ class ARCShooterGamePlugin(Plugin):
         lobby.leave(player.name)
         self.player_to_lobby.pop(player.name, None)
         self._ff_warn_at.pop(player.name, None)
-        self._clear_buy_freeze(player.name)
+        self._clear_preparation_freeze(player)
         self._clear_match_effects(player.name)
         self._restore_player(player, after_match=True)
         self._restore_name_tag(player)
@@ -959,7 +966,7 @@ class ARCShooterGamePlugin(Plugin):
             else:
                 player.send_message(self._t("START_NEED_PLAYERS"))
             return
-        buy_seconds = self.config_store.buy_time() if self.config_store else 20
+        buy_seconds = self.config_store.preparation_time() if self.config_store else 20
         countdown = self.config_store.start_countdown() if self.config_store else 5
         starting = self.config_store.starting_points() if self.config_store else 1000
         strategy = self._acquire_strategy(lobby)
@@ -1019,8 +1026,8 @@ class ARCShooterGamePlugin(Plugin):
 
     def _finish_countdown_and_start(self, lobby: Lobby, now: float) -> None:
         strategy = self._acquire_strategy(lobby)
-        buy_seconds = self.config_store.buy_time() if self.config_store else 20
-        # 军械库/商店开局都进入配置/购买窗：全员无敌 + 移速 0
+        buy_seconds = self.config_store.preparation_time() if self.config_store else 20
+        # 军械库/商店开局都进入准备时间窗：全员无敌 + 移速 0 + 发放弧光币
         if not strategy.uses_buy_phase:
             buy_seconds = 0
         for ps in lobby.online_players():
@@ -1031,8 +1038,8 @@ class ARCShooterGamePlugin(Plugin):
             self._prepare_fighter(member, lobby)
             self._restore_player_loadout(member, lobby, gadgets=True)
             if buy_seconds > 0:
-                self._set_buy_freeze(member)
-                self._give_arc_coin(member)
+                self._apply_spawn_protect(member, duration=buy_seconds)
+                # 注：2026-09-05 取消 _set_preparation_freeze（让玩家准备时间自由跑）
         self._apply_lobby_name_tags(lobby)
         lobby.begin_buy(buy_seconds, now)
         if buy_seconds <= 0:
@@ -1065,10 +1072,15 @@ class ARCShooterGamePlugin(Plugin):
             member = self._get_player(ps.name)
             if member is None:
                 continue
-            self._clear_buy_freeze(ps.name)
+            self._clear_preparation_freeze(member)
             self._take_arc_coin(member)
+            # 把开局准备窗 timer 显式弹出，避免 20s 后 _expire_purchase_windows
+            # 误发"保护时间结束"之类的过期提示；进入对局通过 toast/broadcast 提示。
+            self._spawn_protect_until.pop(ps.name, None)
             self._apply_match_buffs(member)
             self._apply_team_name_tag(member, lobby)
+            # === 2026-09-05：比赛开始时再 tp 一次（保险，护甲已在 _prepare_fighter 发过） ===
+            self._tp_to_team_spawn(member, lobby)
             self._send_toast(
                 member,
                 self._t("MATCH_START_TOAST_TITLE"),
@@ -1122,6 +1134,11 @@ class ARCShooterGamePlugin(Plugin):
             )
 
     def _prepare_fighter(self, player: Player, lobby: Lobby) -> None:
+        """开赛准备阶段：清空玩家物品 + 满血 + 给 arc_coin + 传送到队伍出生点
+        + 第一次传送时立即发队伍色护甲。
+        2026-09-05 改：不再冻结移速（让玩家准备时间自由跑）；护甲在第一次
+        传送时立即发（不再拖到 _enter_playing）。
+        """
         snap = snapshot_player(player, dimension_id_of(player.location))
         self.backups[player.name] = snap
         try:
@@ -1136,12 +1153,16 @@ class ARCShooterGamePlugin(Plugin):
         except Exception:
             pass
         self._tp_to_team_spawn(player, lobby)
+        # === 2026-09-05：第一次传送时立即发队伍色护甲（OP 要求） ===
+        self._apply_team_colored_armor(player, lobby)
         self._give_arc_coin(player)
 
     def _respawn_in_match(self, player: Player, lobby: Lobby) -> None:
         self._tp_to_team_spawn(player, lobby)
         self._clear_player(player.name)
         clear_armor(player)
+        # === 2026-09-05：复活时 clear_armor 之后立即重穿队伍色护甲 ===
+        self._apply_team_colored_armor(player, lobby)
         ps = lobby.players.get(player.name)
         if ps is not None and lobby.state == STATE_PLAYING:
             strategy = self._acquire_strategy(lobby)
@@ -1168,9 +1189,16 @@ class ARCShooterGamePlugin(Plugin):
             pass
         if lobby.state == STATE_PLAYING:
             self._apply_match_buffs(player)
-            self._apply_spawn_protect(player)
+            # 复活后只开短无敌窗：无敌 + 弧光币（默认 3s）。不冻结移速，
+            # 玩家复活即可自由跑位（同时拿 speed 效果）。
+            self._apply_spawn_protect(
+                player, duration=self._respawn_invuln_window_seconds()
+            )
         elif lobby.state == STATE_BUYING:
-            self._set_buy_freeze(player)
+            # 极端情况：开局阶段玩家被踢出又重新加入。沿用剩余开局准备时长
+            # （2026-09-05 取消冻结移速）。
+            remaining = max(1, int(math.ceil(lobby.buy_remaining())))
+            self._apply_spawn_protect(player, duration=remaining)
 
     def _respawn_in_match_by_name(self, player_name: str, lobby_id: str) -> None:
         player = self._get_player(player_name)
@@ -1194,6 +1222,33 @@ class ARCShooterGamePlugin(Plugin):
             return
         self._apply_owned_weapon_ammo(player, ps)
 
+    def _apply_team_colored_armor(self, player: Player, lobby: Lobby) -> None:
+        """按队伍颜色自动给玩家穿护甲（2026-09-05 加入）。
+        配置项：settings.yml 的 TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR（JSON 嵌套）。
+        例子：{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}
+        - TEAM_A/B：按配置发 3 件（OP 可改 settings.yml 调整每队每槽位）
+        - 其它/无队伍：仅给原版绿色防弹衣（兜底，不区分颜色）
+        """
+        if player is None or lobby is None:
+            return
+        ps = lobby.players.get(player.name)
+        team = ps.team if ps is not None else None
+        if team in (TEAM_A, TEAM_B):
+            cfg = self.config_store.default_team_armor(team) if self.config_store else {}
+            extras = {item_id: 1 for item_id in cfg.values() if item_id}
+        else:
+            # 旁观 / 未分队：只给原版绿色防弹衣，避免玩家完全裸装
+            extras = {"arc:6b45_vest": 1}
+        if not extras:
+            return
+        try:
+            apply_armor_extras(player, extras, 0)
+        except Exception as e:
+            self._safe_log(
+                "warning",
+                f"[ARCShooterGame] apply_team_colored_armor failed for {player.name}: {e}",
+            )
+
     def _give_arc_coin(self, player: Player) -> None:
         remove_item_count(player, ARC_COIN_ITEM, 64)
         set_slot_item(player, ARC_COIN_HOTBAR_SLOT, ARC_COIN_ITEM, 1, 0)
@@ -1201,10 +1256,17 @@ class ARCShooterGamePlugin(Plugin):
     def _take_arc_coin(self, player: Player) -> None:
         remove_item_count(player, ARC_COIN_ITEM, 64)
 
-    def _purchase_window_seconds(self) -> float:
+    def _preparation_window_seconds(self) -> float:
+        """开局长度（购买/换装窗；冻结移速）。"""
         if self.config_store is not None:
-            return float(max(1, self.config_store.buy_time()))
+            return float(max(1, self.config_store.preparation_time()))
         return float(SPAWN_PROTECT_SECONDS)
+
+    def _respawn_invuln_window_seconds(self) -> float:
+        """复活后无敌窗长度（仅无敌 + 弧光币；不冻结移速）。0 = 关闭。"""
+        if self.config_store is not None:
+            return float(max(0, self.config_store.respawn_invuln_time()))
+        return 0.0
 
     def _spawn_protect_remaining(self, player_name: str) -> int:
         until = self._spawn_protect_until.get(player_name)
@@ -1216,7 +1278,7 @@ class ARCShooterGamePlugin(Plugin):
         return int(math.ceil(remain))
 
     def _can_use_purchase_ui(self, player: Player) -> bool:
-        """购买/换装仅限购买阶段或无敌窗。"""
+        """购买/换装仅限开局准备阶段（STATE_BUYING）或复活无敌窗内。"""
         lobby = self._lobby_of(player.name)
         if lobby is None:
             return False
@@ -1227,6 +1289,9 @@ class ARCShooterGamePlugin(Plugin):
         return False
 
     def _expire_purchase_windows(self) -> None:
+        """处理到期的准备/无敌窗 timer。
+        开局准备窗的 timer 已在 _enter_playing 显式弹出，到这里的只剩复活无敌窗。
+        """
         now = time.time()
         expired = [
             name
@@ -1238,11 +1303,14 @@ class ARCShooterGamePlugin(Plugin):
             player = self._get_player(name)
             if player is None:
                 continue
+            # 复活玩家未被冻结（_prep_frozen 不含），故 _clear_preparation_freeze 是 no-op
+            self._clear_preparation_freeze(player)
             self._take_arc_coin(player)
             lobby = self._lobby_of(name)
             if lobby is not None:
                 self._apply_team_name_tag(player, lobby)
-            player.send_message(self._t("PURCHASE_WINDOW_ENDED"))
+            # 仅复活无敌窗会走到这里，提示文案区分
+            player.send_message(self._t("RESPAWN_INVULN_ENDED"))
 
     def _try_open_shop(self, player: Player) -> bool:
         lobby = self._lobby_of(player.name)
@@ -1744,7 +1812,7 @@ class ARCShooterGamePlugin(Plugin):
             self.player_to_lobby.pop(name, None)
             member = self._get_player(name)
             if member:
-                self._clear_buy_freeze(name)
+                self._clear_preparation_freeze(member)
                 self._clear_match_effects(name)
                 self._restore_player(member, after_match=True)
                 self._restore_name_tag(member)
@@ -2082,19 +2150,12 @@ class ARCShooterGamePlugin(Plugin):
         )
 
     def _set_movement_speed(self, player_name: str, speed: float) -> None:
-        try:
-            self.server.dispatch_command(
-                self.server.command_sender,
-                (
-                    f"attribute {format_player_name(player_name)} "
-                    f"minecraft:movement base set {float(speed)}"
-                ),
-            )
-        except Exception as e:
-            self._safe_log(
-                "warning",
-                f"[ARCShooterGame] set movement speed for {player_name}: {e}",
-            )
+        """已禁用（2026-09-05）：之前用 vanilla `attribute ... minecraft:movement base`
+        命令设移速，但部分服务器版本不支持（报 `Unknown command: attribute`）。
+        当前不做速度修改——准备时间允许玩家自由跑（按 OP 要求）。
+        该函数保留为 no-op 仅为兼容旧调用点，避免删函数引发连锁 AttributeError。
+        """
+        return
 
     def _is_spawn_protected(self, player_name: str) -> bool:
         until = self._spawn_protect_until.get(player_name)
@@ -2104,9 +2165,19 @@ class ARCShooterGamePlugin(Plugin):
             return False
         return True
 
-    def _apply_spawn_protect(self, player: Player) -> None:
-        # 无敌窗 = 购买/换装窗；期间发放弧光币
-        self._spawn_protect_until[player.name] = time.time() + self._purchase_window_seconds()
+    def _apply_spawn_protect(
+        self, player: Player, duration: Optional[float] = None
+    ) -> None:
+        """开启玩家无敌窗：无敌 + 发放弧光币（不冻结移速）。
+        冻结（walk_speed=0）只在开局准备阶段需要，调用方应额外调用
+        _set_preparation_freeze；复活场景不需要冻结，玩家复活即可自由行动。
+        duration=None 时回退到开局长度（self._preparation_window_seconds）。
+        """
+        if duration is None:
+            duration = self._preparation_window_seconds()
+        if duration <= 0:
+            return
+        self._spawn_protect_until[player.name] = time.time() + float(duration)
         self._give_arc_coin(player)
         lobby = self._lobby_of(player.name)
         if lobby is not None:
@@ -2120,41 +2191,37 @@ class ARCShooterGamePlugin(Plugin):
         self._spawn_protect_until.pop(player_name, None)
         self._clear_effects(player_name)
 
-    def _set_buy_freeze(self, player: Player) -> None:
-        self._buy_frozen.add(player.name)
-        # 移速归零 + 极高缓速，避免属性被其它插件/效果顶掉后还能跑
+    def _set_preparation_freeze(self, player: Player) -> None:
+        """将玩家移入准备时间窗。
+        用 attribute 命令设 minecraft:movement base=0（不动 FOV），
+        不用 Endstone Player.walk_speed API（设 0 会让客户端把 FOV 缩到最小，
+        视觉上跟 slowness 一模一样，玩家反馈"视野被放大/迟缓"）。
+        """
+        self._prep_frozen.add(player.name)
         self._set_movement_speed(player.name, 0.0)
-        try:
-            self.server.dispatch_command(
-                self.server.command_sender,
-                f"effect {format_player_name(player.name)} speed 0 0 true",
-            )
-        except Exception:
-            pass
-        self._dispatch_effect(player.name, "slowness", MATCH_BUFF_DURATION_SECONDS, 255)
 
-    def _clear_buy_freeze(self, player_name: str) -> None:
-        if player_name not in self._buy_frozen:
+    def _clear_preparation_freeze(self, player: Player) -> None:
+        if player.name not in self._prep_frozen:
             return
-        self._buy_frozen.discard(player_name)
-        self._set_movement_speed(player_name, DEFAULT_MOVEMENT_SPEED)
-        try:
-            self.server.dispatch_command(
-                self.server.command_sender,
-                f"effect {format_player_name(player_name)} slowness 0 0 true",
-            )
-        except Exception:
-            pass
+        self._prep_frozen.discard(player.name)
+        # 统一用 attribute 命令恢复默认移速（与 _set_preparation_freeze 路径一致）
+        self._set_movement_speed(player.name, DEFAULT_MOVEMENT_SPEED)
 
-    def _enforce_buy_freeze(self, lobby: Lobby) -> None:
+    def _enforce_preparation_freeze(self, lobby: Lobby) -> None:
+        """每 fast tick 强制处于开局准备阶段（STATE_BUYING）的玩家移速为 0，
+        防止其它逻辑把 movement base 改回。
+        复活后的 STATE_PLAYING 玩家不冻结（玩家应能自由跑位+保命）。
+        """
+        if lobby.state != STATE_BUYING:
+            return
         for ps in lobby.online_players():
             player = self._get_player(ps.name)
             if player is None:
                 continue
-            if ps.name not in self._buy_frozen:
-                self._set_buy_freeze(player)
+            if ps.name not in self._prep_frozen:
+                self._set_preparation_freeze(player)
             else:
-                # 每 tick 重压移速，防止被其它逻辑改回
+                # 每 tick 重压 attribute，防止被其它逻辑改回
                 self._set_movement_speed(ps.name, 0.0)
 
     def _player_is_sneaking(self, player: Player) -> bool:
@@ -3353,6 +3420,9 @@ class ARCShooterGamePlugin(Plugin):
         return "\n".join(lines)
 
     def _show_armory(self, player: Player) -> None:
+        """军械库首页：只显示 5 个配置按钮 + 顶部/底部导航。
+        点击配置后跳到 _show_armory_preset_edit 配置该预设。
+        """
         try:
             if self.loadout_store is None or self.config_store is None:
                 player.send_message(self._t("ARMORY_UNAVAILABLE"))
@@ -3402,28 +3472,6 @@ class ARCShooterGamePlugin(Plugin):
                     self._t("ARMORY_BTN_PRESET").format(i + 1, mark, edit_mark),
                     on_click=lambda sender, s=i: self._armory_select_preset(sender, s),
                 )
-            if editable:
-                form.add_button(
-                    self._t("ARMORY_BTN_PRIMARY"),
-                    on_click=lambda sender: self._show_armory_slot(sender, "primary"),
-                )
-                form.add_button(
-                    self._t("ARMORY_BTN_SECONDARY"),
-                    on_click=lambda sender: self._show_armory_slot(sender, "secondary"),
-                )
-                form.add_button(
-                    self._t("ARMORY_BTN_MELEE"),
-                    on_click=lambda sender: self._show_armory_slot(sender, "melee"),
-                )
-                form.add_button(
-                    self._t("ARMORY_BTN_ARMOR"),
-                    on_click=lambda sender: self._show_armory_slot(sender, "armor"),
-                )
-                for i in range(self._gadget_slot_count()):
-                    form.add_button(
-                        self._t("ARMORY_BTN_GADGET").format(i + 1),
-                        on_click=lambda sender, idx=i: self._show_armory_slot(sender, "gadget", idx),
-                    )
             if in_match:
                 form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
             else:
@@ -3451,9 +3499,102 @@ class ARCShooterGamePlugin(Plugin):
             player.send_message(self._t("ARMORY_PRESET_APPLIED").format(slot_i + 1))
         else:
             player.send_message(self._t("ARMORY_PRESET_SELECTED").format(slot_i + 1))
-        self._show_armory(player)
+        # 进入该预设的编辑视图（显示该预设当前的武器 + 5 个槽位按钮）
+        self._show_armory_preset_edit(player)
+
+    def _show_armory_preset_edit(self, player: Player) -> None:
+        """配置编辑视图：显示当前正在编辑的预设的 5 个槽位按钮。
+        顶部为返回按钮（回到 5 配置列表），下方为各槽位入口。
+        """
+        try:
+            if self.loadout_store is None or self.config_store is None:
+                player.send_message(self._t("ARMORY_UNAVAILABLE"))
+                return
+            in_match = not self._armory_out_of_match(player)
+            editable = self._armory_editable(player)
+            if in_match and not editable:
+                player.send_message(self._t("PURCHASE_ONLY_INVULN"))
+                return
+            defaults = self._default_weapons()
+            self.loadout_store.ensure_presets(player.name, defaults)
+            active = self.loadout_store.get_active_slot(player.name)
+            edit_slot = self._armory_edit_slot(player)
+            level = self._player_level(player.name)
+            xp = 0
+            if self.career_store is not None:
+                xp = self.career_store.get(player.name).xp
+            xp_per = self.config_store.xp_per_level()
+            max_lv = self.config_store.max_level()
+            level_i, into, per = xp_progress(xp, xp_per_level=xp_per, max_level=max_lv)
+            if level_i >= max_lv:
+                level_line = self._t("PROFILE_LINE_LEVEL_MAX").format(level_i, xp)
+            else:
+                level_line = self._t("PROFILE_LINE_LEVEL").format(level_i, into, per)
+            loadout = sanitize_loadout(
+                self.loadout_store.get_preset(player.name, edit_slot, defaults=defaults),
+                self.config_store.weapons,
+                defaults,
+                level,
+                gadget_slots=self._gadget_slot_count(),
+            )
+            note = ""
+            if in_match:
+                remain = self._spawn_protect_remaining(player.name)
+                note = "\n" + self._t("ARMORY_MATCH_WINDOW").format(remain)
+            content = (
+                self._t("ARMORY_PRESET_EDIT_CONTENT").format(
+                    level_line,
+                    active + 1,
+                    self._armory_loadout_lines(loadout),
+                )
+                + note
+            )
+            form = ActionForm(
+                title=self._t("ARMORY_PRESET_EDIT_TITLE").format(edit_slot + 1),
+                content=content,
+            )
+            # 顶部：返回按钮
+            form.add_button(
+                self._t("BACK"),
+                on_click=lambda sender: self._show_armory(sender),
+            )
+            if editable:
+                form.add_button(
+                    self._t("ARMORY_BTN_PRIMARY"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "primary"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_SECONDARY"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "secondary"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_MELEE"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "melee"),
+                )
+                form.add_button(
+                    self._t("ARMORY_BTN_ARMOR"),
+                    on_click=lambda sender: self._show_armory_slot(sender, "armor"),
+                )
+                for i in range(self._gadget_slot_count()):
+                    form.add_button(
+                        self._t("ARMORY_BTN_GADGET").format(i + 1),
+                        on_click=lambda sender, idx=i: self._show_armory_slot(
+                            sender, "gadget", idx
+                        ),
+                    )
+            player.send_form(form)
+        except Exception as e:
+            self._safe_log(
+                "error",
+                f"[ARCShooterGame] armory preset edit: {e}\n{traceback.format_exc()}",
+            )
+            player.send_message(self._t("PANEL_ERROR"))
 
     def _show_armory_slot(self, player: Player, slot: str, index: int = 0) -> None:
+        """选择枪械分类：最上方是返回按钮（回到 preset edit），下方是分类按钮。
+        即使该槽位只有一个分类（如 armor），也显示分类选择器——这样返回按钮
+        永远有"上一层"可回，避免按了返回没反应。
+        """
         if not self._armory_editable(player):
             player.send_message(self._t("PURCHASE_ONLY_INVULN") if not self._armory_out_of_match(player) else self._t("ARMORY_READONLY"))
             self._show_armory(player)
@@ -3470,14 +3611,25 @@ class ARCShooterGamePlugin(Plugin):
         }
         label = slot_labels.get(slot, slot)
         if not categories:
-            self._show_armory_weapons(player, slot, "", index)
-            return
-        if len(categories) == 1:
-            self._show_armory_weapons(player, slot, categories[0], index)
+            # 防御：没有任何分类时，给一个"空"提示并提供返回
+            form = ActionForm(
+                title=label,
+                content=self._t("ARMORY_EMPTY_CATEGORY"),
+            )
+            form.add_button(
+                self._t("BACK"),
+                on_click=lambda sender: self._show_armory_preset_edit(sender),
+            )
+            player.send_form(form)
             return
         form = ActionForm(
             title=self._t("ARMORY_PICK_CATEGORY").format(label),
             content=self._t("ARMORY_EDITING_PRESET").format(self._armory_edit_slot(player) + 1),
+        )
+        # 顶部：返回按钮（永远回到 preset edit，不会"没反应"）
+        form.add_button(
+            self._t("BACK"),
+            on_click=lambda sender: self._show_armory_preset_edit(sender),
         )
         for cat in categories:
             form.add_button(
@@ -3486,12 +3638,12 @@ class ARCShooterGamePlugin(Plugin):
                     sender, s, c, i
                 ),
             )
-        form.add_button(self._t("BACK"), on_click=lambda sender: self._show_armory(sender))
         player.send_form(form)
 
     def _show_armory_weapons(
         self, player: Player, slot: str, category: str, index: int = 0
     ) -> None:
+        """武器选择：最上方是返回按钮（回到 slot/分类视图），下方是带解锁状态的武器列表。"""
         if not self._armory_editable(player):
             player.send_message(self._t("PURCHASE_ONLY_INVULN") if not self._armory_out_of_match(player) else self._t("ARMORY_READONLY"))
             self._show_armory(player)
@@ -3512,16 +3664,19 @@ class ARCShooterGamePlugin(Plugin):
             title=title,
             content=self._t("ARMORY_EDITING_PRESET").format(edit_slot + 1),
         )
+        # 顶部：返回按钮（回到 slot 分类选择器）
+        form.add_button(
+            self._t("BACK"),
+            on_click=lambda sender, s=slot, i=index: self._show_armory_slot(sender, s, i),
+        )
         for weapon in weapons:
             need = int(weapon.get("unlock_level") or 0)
             unlocked = weapon_unlocked(weapon, level)
+            base_name = str(weapon.get("display_name") or weapon["id"])
             if unlocked:
-                label = str(weapon.get("display_name") or weapon["id"])
+                label = base_name + self._t("ARMORY_UNLOCKED")
             else:
-                label = (
-                    f"§8{weapon.get('display_name') or weapon['id']}"
-                    + self._t("UNLOCK_LOCKED_MARK").format(need)
-                )
+                label = base_name + self._t("ARMORY_LOCKED").format(need)
             wid = weapon["id"]
             form.add_button(
                 label,
@@ -3534,10 +3689,6 @@ class ARCShooterGamePlugin(Plugin):
             on_click=lambda sender, s=slot, i=index: self._armory_pick(
                 sender, s, None, i, 0, True
             ),
-        )
-        form.add_button(
-            self._t("BACK"),
-            on_click=lambda sender, s=slot, i=index: self._show_armory_slot(sender, s, i),
         )
         player.send_form(form)
 
@@ -3583,7 +3734,7 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(self._t("UNLOCK_NEED_LEVEL").format(need_level))
             else:
                 player.send_message(self._t("PANEL_ERROR"))
-            self._show_armory(player)
+            self._show_armory_preset_edit(player)
             return
         if weapon_id:
             player.send_message(
@@ -3599,7 +3750,7 @@ class ARCShooterGamePlugin(Plugin):
             and self._can_use_purchase_ui(player)
         ):
             self._reapply_active_loadout(player, lobby)
-        self._show_armory(player)
+        self._show_armory_preset_edit(player)
 
     # ---------- map config ui ----------
 
