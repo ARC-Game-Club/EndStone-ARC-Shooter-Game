@@ -711,7 +711,7 @@ class ARCShooterGamePlugin(Plugin):
             for lobby in list(self.lobbies.values()):
                 # 注：2026-09-05 取消 _enforce_preparation_freeze（让玩家准备时间自由跑）
                 if lobby.state in (STATE_BUYING, STATE_PLAYING, STATE_COUNTDOWN, STATE_LOBBY):
-                    self._update_sneak_name_tags(lobby)
+                    self._update_sprint_name_tags(lobby)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] fast tick error: {e}\n{traceback.format_exc()}")
 
@@ -733,13 +733,13 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(self._t("REGION_PULLBACK"))
 
     def _send_score_tips(self, lobby: Lobby, now: float) -> None:
-        a_name = lobby.team_name(TEAM_A)
-        b_name = lobby.team_name(TEAM_B)
         remain = int(math.ceil(lobby.buy_remaining(now))) if lobby.state == STATE_BUYING else 0
         for ps in lobby.online_players():
             player = self._get_player(ps.name)
             if player is None:
                 continue
+            a_name = self._score_tip_team_name(lobby, TEAM_A, ps.team)
+            b_name = self._score_tip_team_name(lobby, TEAM_B, ps.team)
             if lobby.state == STATE_BUYING:
                 msg = self._t("BUY_TIME_TIP").format(remain, a_name, lobby.score_a, lobby.score_b, b_name, ps.points)
             else:
@@ -2224,8 +2224,8 @@ class ARCShooterGamePlugin(Plugin):
                 # 每 tick 重压 attribute，防止被其它逻辑改回
                 self._set_movement_speed(ps.name, 0.0)
 
-    def _player_is_sneaking(self, player: Player) -> bool:
-        for attr in ("is_sneaking", "sneaking", "is_crouching"):
+    def _player_is_sprinting(self, player: Player) -> bool:
+        for attr in ("is_sprinting", "sprinting"):
             val = getattr(player, attr, None)
             if isinstance(val, bool):
                 return val
@@ -2236,22 +2236,21 @@ class ARCShooterGamePlugin(Plugin):
                     continue
         return False
 
-    def _update_sneak_name_tags(self, lobby: Lobby) -> None:
+    def _update_sprint_name_tags(self, lobby: Lobby) -> None:
+        """头顶 ID：冲刺或无敌时显示，其它时候清空。"""
         for ps in lobby.online_players():
             player = self._get_player(ps.name)
             if player is None:
                 continue
-            if self._player_is_sneaking(player):
-                try:
-                    if str(getattr(player, "name_tag", "") or "") != "":
-                        player.name_tag = ""
-                except Exception as e:
-                    self._safe_log(
-                        "warning",
-                        f"[ARCShooterGame] clear sneak name_tag for {player.name}: {e}",
-                    )
-            else:
-                self._apply_team_name_tag(player, lobby)
+            self._apply_team_name_tag(player, lobby)
+
+    def _score_tip_team_name(self, lobby: Lobby, team_id: str, viewer_team: str) -> str:
+        """底部比分：自己队伍名上色，对方保持白色。"""
+        name = lobby.team_name(team_id)
+        if team_id == viewer_team:
+            color = TEAM_NAME_COLOR.get(team_id, "§f")
+            return f"{color}{name}§r"
+        return f"§f{name}§r"
 
     def _colored_label(self, text: str, team_id: Optional[str]) -> str:
         color = TEAM_NAME_COLOR.get(team_id or "", "§f")
@@ -2450,13 +2449,16 @@ class ARCShooterGamePlugin(Plugin):
         if player.name not in self._saved_name_tags:
             self._saved_name_tags[player.name] = str(getattr(player, "name_tag", "") or "")
         try:
-            player.name_tag = self._team_name_tag(
-                player.name,
-                ps.team,
-                invincible=(
-                    lobby.state == STATE_BUYING or self._is_spawn_protected(player.name)
-                ),
-            )
+            invincible = lobby.state == STATE_BUYING or self._is_spawn_protected(player.name)
+            # 冲刺或无敌时显示名牌；其它时候隐藏
+            if invincible or self._player_is_sprinting(player):
+                player.name_tag = self._team_name_tag(
+                    player.name,
+                    ps.team,
+                    invincible=invincible,
+                )
+            elif str(getattr(player, "name_tag", "") or "") != "":
+                player.name_tag = ""
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] set name_tag for {player.name}: {e}")
 
