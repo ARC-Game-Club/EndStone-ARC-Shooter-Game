@@ -298,9 +298,33 @@ class ARCShooterGamePlugin(Plugin):
             )
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] Failed to register fast tick: {e}")
+        self._register_arc_main_menu_button()
         self._safe_log("info", "[ARCShooterGame] enabled")
 
+    def _register_arc_main_menu_button(self) -> None:
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+        except Exception:
+            core = None
+        if core is None or not hasattr(core, "api_register_main_menu_button"):
+            return
+        try:
+            core.api_register_main_menu_button(
+                "arc_shooter_game:main",
+                "枪战游戏",
+                on_click=self._show_root_menu,
+                priority=6,
+            )
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] Failed to register ARC main menu button: {e}")
+
     def on_disable(self) -> None:
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+            if core is not None and hasattr(core, "api_unregister_main_menu_button"):
+                core.api_unregister_main_menu_button("arc_shooter_game:main")
+        except Exception:
+            pass
         bind_arc_inventory(None)
         if self.career_store is not None:
             try:
