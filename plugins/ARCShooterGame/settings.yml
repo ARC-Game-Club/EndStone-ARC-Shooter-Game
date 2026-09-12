@@ -30,3 +30,5 @@ MAX_LEVEL=100
 XP_WIN_BONUS_PERCENT=20
 XP_MVP_PER_TEAMMATE=10
 XP_MVP_BONUS=10
+TEAM_A_DEFAULT_ARMOR={"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}
+TEAM_B_DEFAULT_ARMOR={"helmet":"arc:6b47_helmet_blue","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_blue"}

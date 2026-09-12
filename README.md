@@ -1,11 +1,11 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.4.5-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.4.17-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
 
-TDM 固定使用 **军械库（armory）** 配装：赛外配置 5 套预设，开局进入购买/配置窗（全员无敌、无法移动）后右键弧光币换装，正式开赛后收回弧光币。
+TDM 固定使用 **军械库（armory）** 配装：赛外配置 5 套预设，开局进入购买/配置窗（全员无敌、可自由跑动）后右键弧光币换装，正式开赛后收回弧光币。
 
 ## 安装
 
@@ -14,7 +14,9 @@ pip install build
 python -m build
 ```
 
-把 `dist/endstone_arc_shooter_game-0.4.5-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
+依赖插件：`arc_attribute_core`（对局 buff：速度/跳跃提升经其 buff 队列统一管理，清场只撤自己来源）与 `arc_inventory`（配装背包）。
+
+把 `dist/endstone_arc_shooter_game-0.4.17-py3-none-any.whl` 放到服务器 `plugins/`，重启。首次启动会生成：
 
 ```
 plugins/ARCShooterGame/
@@ -59,8 +61,8 @@ plugins/ARCShooterGame/
 2. 房主在大厅内点击 **选择地图与模式**（仅显示已配置完成、且未被其它大厅占用的地图）。
 3. 从首位玩家加入起计时，默认 **15 分钟**未开局则解散大厅。
 4. 房主点击开始后先进入 **传送倒计时**（默认 5 秒），结束后备份背包、清空、切生存并传送到出生点。
-5. **购买/配置阶段**（`BUY_TIME_SECONDS`，默认 20 秒）：全员无敌、移速为 0；发放弧光币，右键打开军械库切换 5 套预设或改配。
-6. 配置时间结束 → **toast 通知开赛**、收回弧光币、解除冻结，进入战斗。
+5. **购买/配置阶段**（`BUY_TIME_SECONDS`，默认 20 秒）：全员无敌、可自由跑动；发放弧光币，右键打开军械库切换 5 套预设或改配。
+6. 配置时间结束 → **toast 通知开赛**、收回弧光币，进入战斗。
 7. 击杀敌对玩家队伍 +1 分；误杀队友 -1 分（不低于 0）。击杀当场获得 XP。
 8. 先达到目标分数或时间到比分高者获胜。结算补发胜方 XP 加成与 MVP 奖励；toast + 战绩表单后还原背包。
 
@@ -114,7 +116,8 @@ XP_MVP_PER_TEAMMATE=10
 |---|---|
 | `DEFAULT_*_WEAPON` | 军械库/开局默认武器 id |
 | `XP_*` / `MAX_LEVEL` | 生涯经验与等级；MVP 额外经验为 `队伍人数 × XP_MVP_PER_TEAMMATE` |
-| `BUY_TIME_SECONDS` | 开局购买/配置窗时长（无敌 + 移速 0 + 弧光币换装） |
+| `BUY_TIME_SECONDS` | 开局购买/配置窗时长（无敌 + 弧光币换装） |
+| `TEAM_A_DEFAULT_ARMOR` / `TEAM_B_DEFAULT_ARMOR` | 按队色开局自动发放的默认护甲（JSON 嵌套：头盔/胸甲/护腿） |
 
 ## 武器 `weapons.json`
 
@@ -145,6 +148,13 @@ python -m unittest tests.test_logic
 ```
 
 ## 更新日志
+
+### v0.4.17
+
+- **对局 buff 接入属性核心**：速度/跳跃提升改由 `arc_attribute_core` 的 buff 队列统一管理（`depend` 硬依赖），不再走 `/effect` 命令——不顶掉其他插件挂的效果，清场只撤自己来源（`shooter:match`）；玩家离线时由属性核心在退出事件里自清
+- **彻底移除移速残留路径**：删掉 `attribute`/`effect` 命令封装与准备阶段每 tick 重压逻辑，准备阶段保持自由跑动
+- **默认配置补全**：`settings.yml` 新增 `TEAM_A_DEFAULT_ARMOR` / `TEAM_B_DEFAULT_ARMOR`（按队色开局自动发放护甲，JSON 嵌套）
+- **冒烟测试**：新增 `scripts/smoke_test_attribute_integration.py`（stub endstone，离线验证 buff 下发/撤销/缓存/核心缺失告警）
 
 ### v0.4.5
 

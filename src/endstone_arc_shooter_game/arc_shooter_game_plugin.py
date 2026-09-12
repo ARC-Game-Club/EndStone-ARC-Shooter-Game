@@ -126,8 +126,6 @@ SHOP_DEBOUNCE_SECONDS = 0.2
 # 兜底；实际准备时间窗优先用 settings PREPARATION_TIME_SECONDS / RESPAWN_INVULNERABLE_SECONDS
 SPAWN_PROTECT_SECONDS = 3
 MATCH_BUFF_DURATION_SECONDS = 1000000
-# 基岩版玩家默认行走速度；准备时间设为 0，对局开始时恢复
-DEFAULT_MOVEMENT_SPEED = 0.1
 TEAM_NAME_COLOR = {
     TEAM_A: "§c",
     TEAM_B: "§9",
@@ -199,6 +197,8 @@ class ARCShooterGamePlugin(Plugin):
     load = "POSTWORLD"
     # 背包发放/扣除依赖弧光背包管理器
     load_after = ["arc_inventory"]
+    # 对局 buff（速度/跳跃提升）经属性核心统一管理
+    depend = ["arc_attribute_core"]
 
     commands = {
         "gs": {
@@ -2149,37 +2149,63 @@ class ARCShooterGamePlugin(Plugin):
             f"gamemode {cmd_mode} {format_player_name(player_name)}",
         )
 
-    def _dispatch_effect(
-        self,
-        player_name: str,
-        effect: str,
-        seconds: int,
-        amplifier: int = 0,
-        *,
-        hide_particles: bool = True,
-    ) -> None:
-        hide = "true" if hide_particles else "false"
-        self.server.dispatch_command(
-            self.server.command_sender,
-            (
-                f"effect {format_player_name(player_name)} {effect} "
-                f"{max(0, int(seconds))} {max(0, int(amplifier))} {hide}"
-            ),
-        )
+    def _attr_core(self):
+        """获取硬依赖 arc_attribute_core（玩家属性/buff 管理器）；找到后缓存。"""
+        core = getattr(self, "_attr_core_cache", None)
+        if core is not None:
+            return core
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_attribute_core")
+        except Exception:
+            return None
+        if core is not None and callable(getattr(core, "api_apply_buff", None)):
+            self._attr_core_cache = core
+            self.logger.info(
+                "[ARCShooterGame] 已接入 arc_attribute_core，对局 buff 交由属性核心统一管理"
+            )
+            return core
+        return None
 
-    def _clear_effects(self, player_name: str) -> None:
-        self.server.dispatch_command(
-            self.server.command_sender,
-            f"effect {format_player_name(player_name)} clear",
-        )
+    def _apply_match_buffs(self, player: Player) -> None:
+        """对局 buff（速度1 + 跳跃提升1）经属性核心 buff 队列下发。
 
-    def _set_movement_speed(self, player_name: str, speed: float) -> None:
-        """已禁用（2026-09-05）：之前用 vanilla `attribute ... minecraft:movement base`
-        命令设移速，但部分服务器版本不支持（报 `Unknown command: attribute`）。
-        当前不做速度修改——准备时间允许玩家自由跑（按 OP 要求）。
-        该函数保留为 no-op 仅为兼容旧调用点，避免删函数引发连锁 AttributeError。
+        走 api_apply_buff 而非 /effect 命令：不顶掉其他插件挂的效果，
+        对局结束 api_remove_buff 只撤自己来源（队列还有别人就自动回退）。
         """
-        return
+        core = self._attr_core()
+        if core is None:
+            if not getattr(self, "_attr_core_missing_warned", False):
+                self._attr_core_missing_warned = True
+                self.logger.error(
+                    "[ARCShooterGame] 未找到 arc_attribute_core（硬依赖），对局 buff 无法生效"
+                )
+            return
+        for effect in ("speed", "jump_boost"):
+            try:
+                core.api_apply_buff(
+                    player,
+                    effect,
+                    level=1,
+                    duration=MATCH_BUFF_DURATION_SECONDS,
+                    source="shooter:match",
+                )
+            except Exception as e:
+                self.logger.error(f"[ARCShooterGame] apply match buff {effect} error: {e}")
+
+    def _clear_match_effects(self, player_name: str) -> None:
+        self._spawn_protect_until.pop(player_name, None)
+        core = self._attr_core()
+        if core is None:
+            return
+        player = self._get_player(player_name)
+        if player is None:
+            # 玩家已离线：属性核心在退出事件里清空其 buff 队列
+            return
+        for effect in ("speed", "jump_boost"):
+            try:
+                core.api_remove_buff(player, effect, source="shooter:match")
+            except Exception as e:
+                self.logger.error(f"[ARCShooterGame] remove match buff {effect} error: {e}")
 
     def _is_spawn_protected(self, player_name: str) -> bool:
         until = self._spawn_protect_until.get(player_name)
@@ -2207,46 +2233,23 @@ class ARCShooterGamePlugin(Plugin):
         if lobby is not None:
             self._apply_team_name_tag(player, lobby)
 
-    def _apply_match_buffs(self, player: Player) -> None:
-        self._dispatch_effect(player.name, "speed", MATCH_BUFF_DURATION_SECONDS, 0)
-        self._dispatch_effect(player.name, "jump_boost", MATCH_BUFF_DURATION_SECONDS, 0)
-
-    def _clear_match_effects(self, player_name: str) -> None:
-        self._spawn_protect_until.pop(player_name, None)
-        self._clear_effects(player_name)
-
     def _set_preparation_freeze(self, player: Player) -> None:
-        """将玩家移入准备时间窗。
-        用 attribute 命令设 minecraft:movement base=0（不动 FOV），
-        不用 Endstone Player.walk_speed API（设 0 会让客户端把 FOV 缩到最小，
-        视觉上跟 slowness 一模一样，玩家反馈"视野被放大/迟缓"）。
+        """将玩家移入准备时间窗（仅记账）。
+
+        移速冻结已于 2026-09-05 按 OP 要求取消（准备时间允许自由跑），
+        不再写任何移速；若将来恢复冻结，应通过 arc_attribute_core 的
+        api_add_factor(player, "walk_speed", source="shooter:freeze", ...) 实现。
         """
         self._prep_frozen.add(player.name)
-        self._set_movement_speed(player.name, 0.0)
 
     def _clear_preparation_freeze(self, player: Player) -> None:
         if player.name not in self._prep_frozen:
             return
         self._prep_frozen.discard(player.name)
-        # 统一用 attribute 命令恢复默认移速（与 _set_preparation_freeze 路径一致）
-        self._set_movement_speed(player.name, DEFAULT_MOVEMENT_SPEED)
 
     def _enforce_preparation_freeze(self, lobby: Lobby) -> None:
-        """每 fast tick 强制处于开局准备阶段（STATE_BUYING）的玩家移速为 0，
-        防止其它逻辑把 movement base 改回。
-        复活后的 STATE_PLAYING 玩家不冻结（玩家应能自由跑位+保命）。
-        """
-        if lobby.state != STATE_BUYING:
-            return
-        for ps in lobby.online_players():
-            player = self._get_player(ps.name)
-            if player is None:
-                continue
-            if ps.name not in self._prep_frozen:
-                self._set_preparation_freeze(player)
-            else:
-                # 每 tick 重压 attribute，防止被其它逻辑改回
-                self._set_movement_speed(ps.name, 0.0)
+        """已停用（2026-09-05）：准备时间不冻结移速。保留空实现兼容旧调用点。"""
+        return
 
     def _player_is_sprinting(self, player: Player) -> bool:
         for attr in ("is_sprinting", "sprinting"):
