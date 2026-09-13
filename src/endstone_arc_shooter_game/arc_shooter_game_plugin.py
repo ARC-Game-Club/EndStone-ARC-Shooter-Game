@@ -314,6 +314,7 @@ class ARCShooterGamePlugin(Plugin):
                 "枪战游戏",
                 on_click=self._show_root_menu,
                 priority=6,
+                icon="textures/arc_core/shooter.png",
             )
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] Failed to register ARC main menu button: {e}")
