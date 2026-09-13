@@ -1,6 +1,6 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.4.17-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.4.18-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
@@ -148,6 +148,11 @@ python -m unittest tests.test_logic
 ```
 
 ## 更新日志
+
+### v0.4.18
+
+- **清理本地 NBT 回退死代码**：`inventory.py` 本地回退的序列化/还原此前调用了 endstone 0.11.x 不存在的 `CompoundTag.dump()` / `endstone.nbt.load()`，异常被静默吞掉，`nbt_b64` 从未真正写入或还原过。直接移除这两段（行为等价），本地回退只保底 type/count/data，完整 NBT 往返交由 arc_inventory（需 ≥ 0.2.0，其 `api_serialize_item` / `api_make_item_stack` 已修复并可用）
+- 依赖顺序本就有 `load_after = ["arc_inventory"]`，未安装时仍可运行（仅告警），本次不改为硬依赖
 
 ### v0.4.17
 

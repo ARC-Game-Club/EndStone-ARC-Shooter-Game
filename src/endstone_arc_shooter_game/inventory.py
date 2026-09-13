@@ -2,11 +2,11 @@
 """比赛期间背包备份 / 清空 / 按格子发放。
 
 布局相关操作（热键定点、护甲、整包快照）优先走弧光背包管理器 API；
-本模块保留磁盘备份与位置/模式等枪战域数据，并在未绑定管理器时本地回退。
+本模块保留磁盘备份与位置/模式等枪战域数据，并在未绑定管理器时本地回退
+（回退只保底 type/count/data，不含 NBT —— 完整 NBT 往返由 arc_inventory 负责）。
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 from pathlib import Path
@@ -128,14 +128,8 @@ def serialize_item(stack: Any) -> Optional[Dict[str, Any]]:
             "count": int(stack.amount),
             "data": int(getattr(stack, "data", 0) or 0),
         }
-        nbt = getattr(stack, "nbt", None)
-        if nbt is not None:
-            try:
-                raw = nbt.dump(byte_order="little")
-                if raw:
-                    entry["nbt_b64"] = base64.b64encode(raw).decode("ascii")
-            except Exception:
-                pass
+        # 不在此兜底 NBT：endstone 0.11.x 的 CompoundTag 没有 dump()，写了也必然失败；
+        # 需要 nbt_b64 请走 arc_inventory 的 api_serialize_item。
         return entry
     except Exception:
         return None
@@ -166,16 +160,8 @@ def deserialize_item(data: Optional[Dict[str, Any]]) -> Any:
     from endstone.inventory import ItemStack
 
     stack = ItemStack(str(type_id), int(data.get("count", 1) or 1), int(data.get("data", 0) or 0))
-    nbt_b64 = data.get("nbt_b64")
-    if nbt_b64:
-        try:
-            from endstone.nbt import load
-
-            tag, _name = load(base64.b64decode(nbt_b64), byte_order="little")
-            if tag is not None and hasattr(stack, "nbt"):
-                stack.nbt = tag
-        except Exception:
-            pass
+    # 不在此兜底 nbt_b64：endstone.nbt 没有 load()，写了也必然失败；
+    # 需要 NBT 还原请走 arc_inventory 的 api_make_item_stack。
     return stack
 
 
