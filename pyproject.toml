@@ -15,8 +15,8 @@ license = { file = "LICENSE" }
 keywords = ["endstone", "plugin", "tdm", "shooter", "minecraft", "bedrock"]
 
 [project.urls]
-Homepage = "https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game"
-Issues = "https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game/issues"
+Homepage = "https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game"
+Issues = "https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game/issues"
 
 [project.entry-points."endstone"]
 arc_shooter_game = "endstone_arc_shooter_game:ARCShooterGamePlugin"

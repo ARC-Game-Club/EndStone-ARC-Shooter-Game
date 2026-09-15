@@ -1,6 +1,6 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.4.18-blue.svg)](https://github.com/ARC-Minecraft/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.4.18-blue.svg)](https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
