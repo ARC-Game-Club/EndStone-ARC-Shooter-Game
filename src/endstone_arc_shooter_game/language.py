@@ -20,7 +20,7 @@ DEFAULT_TEXTS = {
     "ARMOR_SLOT_CHESTPLATE": "胸甲",
     "ARMOR_SLOT_LEGGINGS": "护腿",
     "ARMOR_SLOT_BOOTS": "靴子",
-    "ARMOR_SET_OK": "§a已把当前铠甲保存为{0}默认铠甲：\n{1}\n§7玩家进入对局时会按这套发放。",
+    "ARMOR_SET_OK": "§a已把当前铠甲保存为{0}默认铠甲：\n{1}\n§7玩家进入对局时会按这套发放（含附魔/NBT）。",
     "ARMOR_SET_EMPTY": "§c你身上没有穿戴铠甲（头盔/胸甲/护腿/靴子），穿好后再来设置。",
     "ARMOR_SET_FAIL": "§c{0}默认铠甲保存失败，详见服务器日志。",
     "LEADERBOARD_TITLE": "枪手排行榜 · KD",

@@ -200,10 +200,35 @@ def serialize_armor(inv: Any) -> Dict[str, Any]:
 
 
 DEFAULT_TEAM_ARMOR_SLOTS = ("helmet", "chestplate", "leggings", "boots")
+# 队伍默认铠甲 item_info 白名单（与 arc_inventory make_item_stack 消费的字段一致）
+ARMOR_ITEM_INFO_KEYS = ("type", "data", "enchants", "lore", "nbt_b64")
 
 
-def read_player_armor_ids(player: Any) -> Dict[str, str]:
-    """读取玩家当前穿戴的护甲 → {槽位: 物品 id}（helmet/chestplate/leggings/boots）。
+def normalize_armor_item_info(value: Any) -> Dict[str, Any]:
+    """单槽铠甲配置 → 发放用 item_info（count 恒为 1）。
+
+    旧格式纯 id 字符串归一为 {"type": id}；空 / air / 缺 type 返回 {}。
+    """
+    if isinstance(value, str):
+        value = {"type": value.strip()}
+    if not isinstance(value, dict):
+        return {}
+    info: Dict[str, Any] = {}
+    for key in ARMOR_ITEM_INFO_KEYS:
+        item_value = value.get(key)
+        if item_value is None or item_value == "" or item_value == 0 or item_value == {} or item_value == []:
+            continue
+        info[key] = item_value
+    type_id = str(info.get("type") or "").strip()
+    if not type_id or type_id == "minecraft:air":
+        return {}
+    info["type"] = type_id
+    info["count"] = 1
+    return info
+
+
+def read_player_armor(player: Any) -> Dict[str, Dict[str, Any]]:
+    """读取玩家当前穿戴的护甲 → {槽位: item_info}（含 data/附魔/Lore/NBT）。
 
     供 OP「把当前铠甲存为队伍默认」用；走 arc_inventory 背包管理器
     api_get_inventory_items(include_armor=True)，不自己读背包；未绑定管理器时返回 {}。
@@ -216,17 +241,36 @@ def read_player_armor_ids(player: Any) -> Dict[str, str]:
         items = getter(player, include_armor=True) or []
     except Exception:
         return {}
-    out: Dict[str, str] = {}
+    out: Dict[str, Dict[str, Any]] = {}
     for entry in items:
         if not isinstance(entry, dict):
             continue
         slot = str(entry.get("armor_slot") or "")
         if slot not in DEFAULT_TEAM_ARMOR_SLOTS:
             continue
-        type_id = str(entry.get("type") or "").strip()
-        if type_id and type_id != "minecraft:air":
-            out[slot] = type_id
+        item = normalize_armor_item_info(entry)
+        if item:
+            out[slot] = item
     return out
+
+
+def apply_armor_slot_items(player: Any, slot_items: Dict[str, Any]) -> None:
+    """按槽位穿戴：{armor_slot: item_info}，走 arc_inventory api_set_armor_slot。
+
+    item_info 含 nbt_b64 时由管理器优先还原完整 NBT（失败回退附魔/Lore）。
+    """
+    plugin = get_arc_inventory()
+    setter = getattr(plugin, "api_set_armor_slot", None) if plugin is not None else None
+    if not callable(setter):
+        return
+    for slot, item_info in (slot_items or {}).items():
+        info = normalize_armor_item_info(item_info)
+        if not info:
+            continue
+        try:
+            setter(player, str(slot), info)
+        except Exception:
+            continue
 
 
 def apply_armor(inv: Any, saved: Dict[str, Any]) -> None:

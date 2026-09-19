@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """OP 一键设置队伍默认铠甲冒烟测试（stub endstone）。
 
-覆盖：read_player_armor_ids 只收四个护甲槽、set_default_team_armor 写回
-settings.yml 后 default_team_armor 读回一致（含靴子槽位、另一队隔离）、
+覆盖：read_player_armor 走 arc_inventory API 且保留完整 item_info（data/附魔/Lore/NBT）、
+set_default_team_armor 写回 settings.yml 后 default_team_armor 读回一致（含 NBT）、
+旧格式纯 id 字符串自动归一、apply_armor_slot_items 逐槽走 api_set_armor_slot、
 插件 _set_team_default_armor 的 OP 校验 / 空穿戴保护 / 成功保存。
 """
 import os
@@ -45,9 +46,13 @@ class _ItemTypeId:
 
 
 class FakeItemStack:
-    def __init__(self, type_id, amount=1):
+    def __init__(self, type_id, amount=1, data=0, enchants=None, lore=None, nbt_b64=None):
         self.type = _ItemTypeId(type_id)
         self.amount = amount
+        self.data = data
+        self.enchants = enchants or {}
+        self.lore = lore or []
+        self.nbt_b64 = nbt_b64
 
 
 class FakeInventory:
@@ -69,8 +74,8 @@ class FakePlayer(StubPlayer):
         self.messages.append(m)
 
     def wear(self, **slots):
-        for slot, type_id in slots.items():
-            setattr(self.inventory, slot, None if type_id is None else FakeItemStack(type_id))
+        for slot, stack in slots.items():
+            setattr(self.inventory, slot, stack)
 
 
 class FakeArcInventory:
@@ -93,7 +98,18 @@ class FakeArcInventory:
                 return
             if int(getattr(stack, "amount", 0) or 0) <= 0:
                 return
-            item = {"type": stack.type.id, "count": stack.amount, "slot_index": slot_index}
+            item = {
+                "type": stack.type.id,
+                "count": stack.amount,
+                "data": getattr(stack, "data", 0),
+                "slot_index": slot_index,
+            }
+            if stack.enchants:
+                item["enchants"] = dict(stack.enchants)
+            if stack.lore:
+                item["lore"] = list(stack.lore)
+            if stack.nbt_b64:
+                item["nbt_b64"] = stack.nbt_b64
             if armor_slot:
                 item["armor_slot"] = armor_slot
             items.append(item)
@@ -104,6 +120,17 @@ class FakeArcInventory:
             for attr in inv_mod.ARMOR_ATTRS:
                 entry(getattr(inv, attr, None), attr, armor_slot=attr)
         return items
+
+
+class RecordingArcInventory(FakeArcInventory):
+    """额外记录 api_set_armor_slot 写入，验证发放 item_info 完整。"""
+
+    def __init__(self):
+        self.armor_writes = []
+
+    def api_set_armor_slot(self, player, armor_slot, item_info):
+        self.armor_writes.append((player.name, armor_slot, dict(item_info or {})))
+        return True
 
 
 def make_store():
@@ -122,66 +149,109 @@ def make_plugin(store):
     return plugin
 
 
-# 全程绑定假背包管理器：read_player_armor_ids 必须走 arc_inventory API
+# 全程绑定假背包管理器：读取/发放都必须走 arc_inventory API
 inv_mod.bind_arc_inventory(FakeArcInventory())
 
-print("== 1) read_player_armor_ids：只收头盔/胸甲/护腿/靴子，忽略 air / 空槽 / 副手")
+print("== 1) read_player_armor：只收四个护甲槽，且保留 data/附魔/Lore/NBT")
 steve = FakePlayer("Steve")
 steve.wear(
-    helmet="arc:6b47_helmet_red",
-    chestplate="arc:6b45_vest",
-    leggings="arc:emr_suit_red",
-    boots="arc:balaclava",
+    helmet=FakeItemStack(
+        "arc:6b47_helmet_red", enchants={"protection": 2}, lore=["红队盔"], nbt_b64="abc123=="
+    ),
+    chestplate=FakeItemStack("arc:6b45_vest"),
+    leggings=FakeItemStack("arc:emr_suit_red", data=1),
+    boots=FakeItemStack("arc:balaclava"),
 )
-steve.inventory.item_in_off_hand = FakeItemStack("minecraft:shield")
-worn = inv_mod.read_player_armor_ids(steve)
+steve.inventory.item_in_off_hand = FakeItemStack("minecraft:shield")  # 不该被收进来
+worn = inv_mod.read_player_armor(steve)
 assert worn == {
-    "helmet": "arc:6b47_helmet_red",
-    "chestplate": "arc:6b45_vest",
-    "leggings": "arc:emr_suit_red",
-    "boots": "arc:balaclava",
+    "helmet": {
+        "type": "arc:6b47_helmet_red",
+        "enchants": {"protection": 2},
+        "lore": ["红队盔"],
+        "nbt_b64": "abc123==",
+        "count": 1,
+    },
+    "chestplate": {"type": "arc:6b45_vest", "count": 1},
+    "leggings": {"type": "arc:emr_suit_red", "data": 1, "count": 1},
+    "boots": {"type": "arc:balaclava", "count": 1},
 }, worn
 
 steve.inventory.chestplate = FakeItemStack("minecraft:air")
 steve.inventory.leggings = FakeItemStack("arc:emr_suit_red", amount=0)
-assert inv_mod.read_player_armor_ids(steve) == {
-    "helmet": "arc:6b47_helmet_red",
-    "boots": "arc:balaclava",
+assert inv_mod.read_player_armor(steve) == {
+    "helmet": {
+        "type": "arc:6b47_helmet_red",
+        "enchants": {"protection": 2},
+        "lore": ["红队盔"],
+        "nbt_b64": "abc123==",
+        "count": 1,
+    },
+    "boots": {"type": "arc:balaclava", "count": 1},
 }
-print("   槽位过滤 ok")
+print("   槽位过滤 + 完整 item_info ok")
 
-print("\n== 2) ConfigStore 往返：set → default 读回一致，另一队不受影响")
+print("\n== 2) ConfigStore 往返：set → default 读回一致（含 NBT），另一队不受影响")
 store = make_store()
 default_a_before = store.default_team_armor(TEAM_A)
-assert default_a_before.get("helmet") == "arc:6b47_helmet_red", default_a_before  # settings.yml 自带默认
+assert default_a_before["helmet"]["type"] == "arc:6b47_helmet_red", default_a_before  # settings.yml 自带默认（旧格式归一）
 
 store.set_default_team_armor(TEAM_A, worn)
 assert store.default_team_armor(TEAM_A) == worn, store.default_team_armor(TEAM_A)
-assert store.default_team_armor(TEAM_B).get("helmet") == "arc:6b47_helmet_blue"
+assert store.default_team_armor(TEAM_B)["helmet"]["type"] == "arc:6b47_helmet_blue"
 
 raw = Path("plugins/ARCShooterGame/settings.yml").read_text(encoding="utf-8")
-assert "TEAM_A_DEFAULT_ARMOR=" in raw and "arc:balaclava" in raw, raw
-print("   往返 + 蓝方隔离 ok")
+assert "TEAM_A_DEFAULT_ARMOR=" in raw and "abc123==" in raw, raw
+print("   往返 + NBT 落盘 + 蓝方隔离 ok")
 
-print("\n== 3) 插件处理器：OP 穿好铠甲 → 一键存为蓝方默认")
+print("\n== 3) 旧格式兼容：纯 id 字符串自动归一为 item_info")
+store.settings.SetSetting(
+    "TEAM_A_DEFAULT_ARMOR",
+    '{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest"}',
+)
+assert store.default_team_armor(TEAM_A) == {
+    "helmet": {"type": "arc:6b47_helmet_red", "count": 1},
+    "chestplate": {"type": "arc:6b45_vest", "count": 1},
+}, store.default_team_armor(TEAM_A)
+print("   旧格式归一 ok")
+
+print("\n== 4) apply_armor_slot_items：逐槽走 api_set_armor_slot，item_info 完整且 count=1")
+rec = RecordingArcInventory()
+inv_mod.bind_arc_inventory(rec)
 alex = FakePlayer("Alex")
+inv_mod.apply_armor_slot_items(
+    alex,
+    {
+        "helmet": {"type": "arc:6b47_helmet_blue", "nbt_b64": "zz==", "name": "不该带出去"},
+        "chestplate": {"type": ""},
+    },
+)
+assert rec.armor_writes == [
+    ("Alex", "helmet", {"type": "arc:6b47_helmet_blue", "nbt_b64": "zz==", "count": 1})
+], rec.armor_writes
+inv_mod.bind_arc_inventory(FakeArcInventory())
+print("   逐槽发放 ok")
+
+print("\n== 5) 插件处理器：OP 穿好铠甲 → 一键存为蓝方默认（NBT 落盘）")
 alex.wear(
-    helmet="arc:6b47_helmet_blue",
-    chestplate="arc:6b45_vest",
-    leggings="arc:emr_suit_blue",
+    helmet=FakeItemStack("arc:6b47_helmet_blue", nbt_b64="blue-nbt=="),
+    chestplate=FakeItemStack("arc:6b45_vest"),
+    leggings=FakeItemStack("arc:emr_suit_blue"),
 )
 plugin = make_plugin(store)
 plugin._set_team_default_armor(alex, TEAM_B)
 assert store.default_team_armor(TEAM_B) == {
-    "helmet": "arc:6b47_helmet_blue",
-    "chestplate": "arc:6b45_vest",
-    "leggings": "arc:emr_suit_blue",
+    "helmet": {"type": "arc:6b47_helmet_blue", "nbt_b64": "blue-nbt==", "count": 1},
+    "chestplate": {"type": "arc:6b45_vest", "count": 1},
+    "leggings": {"type": "arc:emr_suit_blue", "count": 1},
 }, store.default_team_armor(TEAM_B)
+raw = Path("plugins/ARCShooterGame/settings.yml").read_text(encoding="utf-8")
+assert "TEAM_B_DEFAULT_ARMOR=" in raw and "blue-nbt==" in raw, raw
 assert any(m.startswith("ARMOR_SET_OK") for m in alex.messages), alex.messages
 assert not plugin.logger.errors
 print("   蓝方保存 ok")
 
-print("\n== 4) 插件处理器：没穿铠甲 → 提示且不覆盖旧配置")
+print("\n== 6) 插件处理器：没穿铠甲 → 提示且不覆盖旧配置")
 before_a = store.default_team_armor(TEAM_A)
 empty = FakePlayer("Empty")
 plugin._set_team_default_armor(empty, TEAM_A)
@@ -189,19 +259,20 @@ assert any(m == "ARMOR_SET_EMPTY" for m in empty.messages), empty.messages
 assert store.default_team_armor(TEAM_A) == before_a
 print("   空穿戴保护 ok")
 
-print("\n== 5) 插件处理器：非 OP → 拒绝且不改配置")
+print("\n== 7) 插件处理器：非 OP → 拒绝且不改配置")
 mallory = FakePlayer("Mallory", is_op=False)
-mallory.wear(helmet="arc:6b47_helmet_red")
+mallory.wear(helmet=FakeItemStack("arc:6b47_helmet_red"))
 plugin._set_team_default_armor(mallory, TEAM_A)
 assert any(m == "CMD_NO_PERMISSION" for m in mallory.messages), mallory.messages
 assert store.default_team_armor(TEAM_A) == before_a
 print("   权限校验 ok")
 
-print("\n== 6) 未绑定背包管理器 → 读取返回空，不自己兜底读背包")
+print("\n== 8) 未绑定背包管理器 → 读取返回空、发放静默跳过，不自己兜底")
 inv_mod.bind_arc_inventory(None)
 nobody = FakePlayer("Nobody")
-nobody.wear(helmet="arc:6b47_helmet_red")
-assert inv_mod.read_player_armor_ids(nobody) == {}
+nobody.wear(helmet=FakeItemStack("arc:6b47_helmet_red"))
+assert inv_mod.read_player_armor(nobody) == {}
+inv_mod.apply_armor_slot_items(nobody, {"helmet": {"type": "arc:6b47_helmet_red"}})
 inv_mod.bind_arc_inventory(FakeArcInventory())
 print("   仅走 arc_inventory API ok")
 

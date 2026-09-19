@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from endstone_arc_shooter_game.inventory import normalize_armor_item_info
 from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 IMPLEMENTED_MODES = {"tdm"}
@@ -1162,8 +1163,10 @@ class ConfigStore:
         print(f"[{level.upper()}] {message}")
 
     def default_team_armor(self, team_id):
-        """Return default armor {slot: item_id} for a team (helmet/chestplate/leggings/boots).
-        Read JSON from settings.yml (TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR).
+        """Return default armor {slot: item_info} for a team (helmet/chestplate/leggings/boots).
+
+        item_info 含 type/count/data/enchants/lore/nbt_b64（count 恒为 1）；
+        settings.yml 里的旧格式纯 id 字符串由 normalize_armor_item_info 自动归一。
         OP 在游戏内菜单一键把身上铠甲存为队伍默认（见 set_default_team_armor）。
         Fallback to hardcoded defaults if missing/parse-fails.
         """
@@ -1182,21 +1185,29 @@ class ConfigStore:
                 if isinstance(parsed, dict):
                     cfg = {}
                     for slot in DEFAULT_ARMOR_SLOTS:
-                        item = str(parsed.get(slot) or '').strip()
-                        if item:
-                            cfg[slot] = item
+                        info = normalize_armor_item_info(parsed.get(slot))
+                        if info:
+                            cfg[slot] = info
                     return cfg
             except Exception:
                 pass
         # Fallback: 跟随 mod 原本的"原版绿色防弹衣 + 红/蓝头盔/迷彩服"
         if team_id == TEAM_A:
-            return {'helmet': 'arc:6b47_helmet_red', 'chestplate': 'arc:6b45_vest', 'leggings': 'arc:emr_suit_red'}
+            return {
+                'helmet': {'type': 'arc:6b47_helmet_red'},
+                'chestplate': {'type': 'arc:6b45_vest'},
+                'leggings': {'type': 'arc:emr_suit_red'},
+            }
         if team_id == TEAM_B:
-            return {'helmet': 'arc:6b47_helmet_blue', 'chestplate': 'arc:6b45_vest', 'leggings': 'arc:emr_suit_blue'}
+            return {
+                'helmet': {'type': 'arc:6b47_helmet_blue'},
+                'chestplate': {'type': 'arc:6b45_vest'},
+                'leggings': {'type': 'arc:emr_suit_blue'},
+            }
         return {}
 
     def set_default_team_armor(self, team_id, armor_cfg) -> None:
-        """把 {slot: item_id} 写回 settings.yml（OP 游戏内一键设置队伍默认铠甲）。"""
+        """把 {slot: item_info} 写回 settings.yml（含附魔/Lore/NBT，OP 游戏内一键设置）。"""
         from endstone_arc_shooter_game.session import TEAM_A, TEAM_B
         import json as _json
         if team_id == TEAM_A:
@@ -1207,9 +1218,9 @@ class ConfigStore:
             return
         clean = {}
         for slot in DEFAULT_ARMOR_SLOTS:
-            item = str((armor_cfg or {}).get(slot) or '').strip()
-            if item:
-                clean[slot] = item
+            info = normalize_armor_item_info((armor_cfg or {}).get(slot))
+            if info:
+                clean[slot] = info
         self.settings.SetSetting(key, _json.dumps(clean, ensure_ascii=False))
 
     def reload(self) -> None:

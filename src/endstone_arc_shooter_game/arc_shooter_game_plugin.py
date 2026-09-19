@@ -51,12 +51,13 @@ from endstone_arc_shooter_game.config import (
 )
 from endstone_arc_shooter_game.inventory import (
     apply_armor_extras,
+    apply_armor_slot_items,
     bind_arc_inventory,
     clear_armor,
     delete_snapshot_disk,
     give_to_end_slots,
     load_snapshot_disk,
-    read_player_armor_ids,
+    read_player_armor,
     remove_armor_extras,
     remove_item_count,
     restore_inventory,
@@ -1251,9 +1252,10 @@ class ARCShooterGamePlugin(Plugin):
 
     def _apply_team_colored_armor(self, player: Player, lobby: Lobby) -> None:
         """按队伍颜色自动给玩家穿护甲（2026-09-05 加入）。
-        配置项：settings.yml 的 TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR（JSON 嵌套）。
-        例子：{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}
-        - TEAM_A/B：按配置发护甲（OP 可在主菜单一键把身上铠甲存为某队默认，或手改 settings.yml）
+        配置项：settings.yml 的 TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR，
+        每槽为 item_info 对象（type/data/enchants/lore/nbt_b64；OP 主菜单一键保存，
+        旧格式纯 id 字符串自动兼容）。
+        - TEAM_A/B：按配置逐槽穿戴（走 arc_inventory api_set_armor_slot，还原 NBT/附魔/Lore）
         - 其它/无队伍：仅给原版绿色防弹衣（兜底，不区分颜色）
         """
         if player is None or lobby is None:
@@ -1262,14 +1264,13 @@ class ARCShooterGamePlugin(Plugin):
         team = ps.team if ps is not None else None
         if team in (TEAM_A, TEAM_B):
             cfg = self.config_store.default_team_armor(team) if self.config_store else {}
-            extras = {item_id: 1 for item_id in cfg.values() if item_id}
         else:
             # 旁观 / 未分队：只给原版绿色防弹衣，避免玩家完全裸装
-            extras = {"arc:6b45_vest": 1}
-        if not extras:
+            cfg = {"chestplate": {"type": "arc:6b45_vest"}}
+        if not cfg:
             return
         try:
-            apply_armor_extras(player, extras, 0)
+            apply_armor_slot_items(player, cfg)
         except Exception as e:
             self._safe_log(
                 "warning",
@@ -2843,7 +2844,7 @@ class ARCShooterGamePlugin(Plugin):
         if self.config_store is None:
             player.send_message(self._t("PANEL_ERROR"))
             return
-        worn = read_player_armor_ids(player)
+        worn = read_player_armor(player)
         if not worn:
             player.send_message(self._t("ARMOR_SET_EMPTY"))
             self._show_root_menu(player)
@@ -2860,8 +2861,8 @@ class ARCShooterGamePlugin(Plugin):
             self._show_root_menu(player)
             return
         parts = []
-        for slot, item in worn.items():
-            parts.append(f"§f{self._t('ARMOR_SLOT_' + slot.upper())} §6{item}")
+        for slot, info in worn.items():
+            parts.append(f"§f{self._t('ARMOR_SLOT_' + slot.upper())} §6{info.get('type', '')}")
         player.send_message(self._t("ARMOR_SET_OK").format(team_label, "\n".join(parts)))
         self._show_root_menu(player)
 
