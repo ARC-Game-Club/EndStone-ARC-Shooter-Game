@@ -11,6 +11,7 @@ from endstone.command import Command, CommandSender
 from endstone.event import (
     ActorDamageEvent,
     event_handler,
+    EventPriority,
     PlayerDeathEvent,
     PlayerDropItemEvent,
     PlayerInteractEvent,
@@ -55,6 +56,7 @@ from endstone_arc_shooter_game.inventory import (
     delete_snapshot_disk,
     give_to_end_slots,
     load_snapshot_disk,
+    read_player_armor_ids,
     remove_armor_extras,
     remove_item_count,
     restore_inventory,
@@ -671,7 +673,7 @@ class ARCShooterGamePlugin(Plugin):
             self._respawn_in_match(player, lobby)
             self._apply_team_name_tag(player, lobby)
 
-    @event_handler
+    @event_handler(priority=EventPriority.LOW)
     def on_player_interact(self, event: PlayerInteractEvent):
         player = getattr(event, "player", None)
         if player is None:
@@ -1251,7 +1253,7 @@ class ARCShooterGamePlugin(Plugin):
         """按队伍颜色自动给玩家穿护甲（2026-09-05 加入）。
         配置项：settings.yml 的 TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR（JSON 嵌套）。
         例子：{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}
-        - TEAM_A/B：按配置发 3 件（OP 可改 settings.yml 调整每队每槽位）
+        - TEAM_A/B：按配置发护甲（OP 可在主菜单一键把身上铠甲存为某队默认，或手改 settings.yml）
         - 其它/无队伍：仅给原版绿色防弹衣（兜底，不区分颜色）
         """
         if player is None or lobby is None:
@@ -1351,8 +1353,10 @@ class ARCShooterGamePlugin(Plugin):
             return True
         strategy = self._acquire_strategy(lobby)
         if not strategy.uses_shop:
+            self._sky_eye_log_action("ShopOpen", player, f"shop=shooter;mode=armory;lobby={lobby.lobby_id}")
             self._show_armory(player)
             return True
+        self._sky_eye_log_action("ShopOpen", player, f"shop=shooter;mode=coin_shop;lobby={lobby.lobby_id}")
         self._show_shop(player)
         return True
 
@@ -1884,6 +1888,18 @@ class ARCShooterGamePlugin(Plugin):
         except Exception:
             return None
 
+    def _sky_eye_log_action(self, action: str, player, detail: str):
+        """写入弧光核心天眼（若已安装且已开启）；核心缺失或异常时静默跳过。"""
+        try:
+            core = self._get_arc_core()
+            if core is None:
+                return
+            logger = getattr(core, "api_sky_eye_log", None)
+            if callable(logger):
+                logger(action, player=player, detail=detail)
+        except Exception:
+            pass
+
     def _distribute_match_rewards(
         self, lobby: Lobby, winner: Optional[str]
     ) -> Tuple[Dict[str, Dict[str, int]], set]:
@@ -2094,12 +2110,12 @@ class ARCShooterGamePlugin(Plugin):
         if snap is None:
             return
         if after_match:
+            # 先清掉对局物品，再还原赛前快照；否则快照会被丢弃、背包清空。
             self._clear_player(player.name)
-        else:
-            try:
-                restore_inventory(player, snap)
-            except Exception as e:
-                self._safe_log("error", f"[ARCShooterGame] restore inventory {player.name}: {e}")
+        try:
+            restore_inventory(player, snap)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] restore inventory {player.name}: {e}")
         loc = snap.get("location") or {}
         self._tp_player(
             player.name,
@@ -2805,11 +2821,49 @@ class ARCShooterGamePlugin(Plugin):
             form.add_button(self._t("BTN_PROFILE"), on_click=lambda sender: self._show_profile(sender))
             if self._is_op(player):
                 form.add_button(self._t("BTN_CONFIG_MAPS"), on_click=lambda sender: self._show_config_maps(sender))
+                form.add_button(
+                    self._t("BTN_SET_ARMOR_A"),
+                    on_click=lambda sender: self._set_team_default_armor(sender, TEAM_A),
+                )
+                form.add_button(
+                    self._t("BTN_SET_ARMOR_B"),
+                    on_click=lambda sender: self._set_team_default_armor(sender, TEAM_B),
+                )
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
             player.send_form(form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] root menu: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
+
+    def _set_team_default_armor(self, player: Player, team_id: str) -> None:
+        """OP 一键：把身上穿戴的铠甲存为红/蓝方默认铠甲（写入 settings.yml）。"""
+        if not self._is_op(player):
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return
+        if self.config_store is None:
+            player.send_message(self._t("PANEL_ERROR"))
+            return
+        worn = read_player_armor_ids(player)
+        if not worn:
+            player.send_message(self._t("ARMOR_SET_EMPTY"))
+            self._show_root_menu(player)
+            return
+        team_label = self._t("TEAM_NAME_A") if team_id == TEAM_A else self._t("TEAM_NAME_B")
+        try:
+            self.config_store.set_default_team_armor(team_id, worn)
+        except Exception as e:
+            self._safe_log(
+                "error",
+                f"[ARCShooterGame] set team default armor ({team_id}) failed: {e}\n{traceback.format_exc()}",
+            )
+            player.send_message(self._t("ARMOR_SET_FAIL").format(team_label))
+            self._show_root_menu(player)
+            return
+        parts = []
+        for slot, item in worn.items():
+            parts.append(f"§f{self._t('ARMOR_SLOT_' + slot.upper())} §6{item}")
+        player.send_message(self._t("ARMOR_SET_OK").format(team_label, "\n".join(parts)))
+        self._show_root_menu(player)
 
     def _show_kd_leaderboard(self, player: Player, page: int = 0) -> None:
         try:

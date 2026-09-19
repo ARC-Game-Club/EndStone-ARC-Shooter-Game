@@ -199,6 +199,36 @@ def serialize_armor(inv: Any) -> Dict[str, Any]:
     return out
 
 
+DEFAULT_TEAM_ARMOR_SLOTS = ("helmet", "chestplate", "leggings", "boots")
+
+
+def read_player_armor_ids(player: Any) -> Dict[str, str]:
+    """读取玩家当前穿戴的护甲 → {槽位: 物品 id}（helmet/chestplate/leggings/boots）。
+
+    供 OP「把当前铠甲存为队伍默认」用；走 arc_inventory 背包管理器
+    api_get_inventory_items(include_armor=True)，不自己读背包；未绑定管理器时返回 {}。
+    """
+    plugin = get_arc_inventory()
+    getter = getattr(plugin, "api_get_inventory_items", None) if plugin is not None else None
+    if not callable(getter):
+        return {}
+    try:
+        items = getter(player, include_armor=True) or []
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        slot = str(entry.get("armor_slot") or "")
+        if slot not in DEFAULT_TEAM_ARMOR_SLOTS:
+            continue
+        type_id = str(entry.get("type") or "").strip()
+        if type_id and type_id != "minecraft:air":
+            out[slot] = type_id
+    return out
+
+
 def apply_armor(inv: Any, saved: Dict[str, Any]) -> None:
     for attr in ARMOR_ATTRS:
         if not hasattr(inv, attr):

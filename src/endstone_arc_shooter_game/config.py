@@ -1137,6 +1137,10 @@ class SettingManager:
         self._rewrite()
 
 
+# 队伍默认铠甲支持的槽位（TEAM_A/B_DEFAULT_ARMOR 的 JSON 键白名单）
+DEFAULT_ARMOR_SLOTS = ("helmet", "chestplate", "leggings", "boots")
+
+
 class ConfigStore:
     def __init__(self, logger=None):
         from endstone_arc_shooter_game.map_db import MapDatabase
@@ -1158,8 +1162,9 @@ class ConfigStore:
         print(f"[{level.upper()}] {message}")
 
     def default_team_armor(self, team_id):
-        """Return default armor {helmet, chestplate, leggings} item ids for a team.
+        """Return default armor {slot: item_id} for a team (helmet/chestplate/leggings/boots).
         Read JSON from settings.yml (TEAM_A_DEFAULT_ARMOR / TEAM_B_DEFAULT_ARMOR).
+        OP 在游戏内菜单一键把身上铠甲存为队伍默认（见 set_default_team_armor）。
         Fallback to hardcoded defaults if missing/parse-fails.
         """
         # 延迟导入避免 config<->session 循环引用
@@ -1175,11 +1180,12 @@ class ConfigStore:
             try:
                 parsed = _json.loads(raw)
                 if isinstance(parsed, dict):
-                    return {
-                        'helmet': str(parsed.get('helmet') or '').strip(),
-                        'chestplate': str(parsed.get('chestplate') or '').strip(),
-                        'leggings': str(parsed.get('leggings') or '').strip(),
-                    }
+                    cfg = {}
+                    for slot in DEFAULT_ARMOR_SLOTS:
+                        item = str(parsed.get(slot) or '').strip()
+                        if item:
+                            cfg[slot] = item
+                    return cfg
             except Exception:
                 pass
         # Fallback: 跟随 mod 原本的"原版绿色防弹衣 + 红/蓝头盔/迷彩服"
@@ -1188,6 +1194,23 @@ class ConfigStore:
         if team_id == TEAM_B:
             return {'helmet': 'arc:6b47_helmet_blue', 'chestplate': 'arc:6b45_vest', 'leggings': 'arc:emr_suit_blue'}
         return {}
+
+    def set_default_team_armor(self, team_id, armor_cfg) -> None:
+        """把 {slot: item_id} 写回 settings.yml（OP 游戏内一键设置队伍默认铠甲）。"""
+        from endstone_arc_shooter_game.session import TEAM_A, TEAM_B
+        import json as _json
+        if team_id == TEAM_A:
+            key = 'TEAM_A_DEFAULT_ARMOR'
+        elif team_id == TEAM_B:
+            key = 'TEAM_B_DEFAULT_ARMOR'
+        else:
+            return
+        clean = {}
+        for slot in DEFAULT_ARMOR_SLOTS:
+            item = str((armor_cfg or {}).get(slot) or '').strip()
+            if item:
+                clean[slot] = item
+        self.settings.SetSetting(key, _json.dumps(clean, ensure_ascii=False))
 
     def reload(self) -> None:
         from endstone_arc_shooter_game.map_db import MapDatabase

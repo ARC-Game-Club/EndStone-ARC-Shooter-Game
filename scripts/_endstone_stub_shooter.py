@@ -45,6 +45,7 @@ def event_handler(*a, **k):
 
 
 evt_mod.event_handler = event_handler
+evt_mod.EventPriority = type("EventPriority", (), {"LOW": "LOW", "NORMAL": "NORMAL", "HIGH": "HIGH", "HIGHEST": "HIGHEST", "MONITOR": "MONITOR"})
 for cls_name in (
     "ActorDamageEvent", "PlayerDeathEvent", "PlayerDropItemEvent",
     "PlayerInteractEvent", "PlayerItemConsumeEvent", "PlayerJoinEvent",
