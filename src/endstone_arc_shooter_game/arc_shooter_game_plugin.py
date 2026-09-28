@@ -2,6 +2,7 @@
 import json
 import math
 import random
+import re
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,10 +35,14 @@ from endstone_arc_shooter_game.career_stats import (
 from endstone_arc_shooter_game.config import (
     IMPLEMENTED_MODES,
     KNOWN_MODES,
+    MODE_SPAWN_TEAMS,
     ConfigStore,
     build_runtime_map_cfg,
+    find_maps_at_point,
     get_mode_config,
     has_region,
+    nearest_spawn_index,
+    normalize_team_arg,
     map_incomplete_reasons,
     mode_incomplete_reasons,
     mode_playable,
@@ -67,6 +72,7 @@ from endstone_arc_shooter_game.inventory import (
 )
 from endstone_arc_shooter_game.language import LanguageManager
 from endstone_arc_shooter_game.loadout import (
+    ACQUIRE_ARMORY,
     REASON_ALREADY_OWNED,
     REASON_DISABLED,
     REASON_INSUFFICIENT,
@@ -91,6 +97,7 @@ from endstone_arc_shooter_game.session import (
     TEAM_A,
     TEAM_B,
     Lobby,
+    PlayerState,
     pick_spawn,
 )
 
@@ -133,6 +140,8 @@ TEAM_NAME_COLOR = {
     TEAM_A: "§c",
     TEAM_B: "§9",
 }
+# /rmspawn 只删脚下半径内的出生点，防止误删远处点位
+SPAWN_CMD_REMOVE_RADIUS = 3.0
 
 
 def format_player_name(raw: str) -> str:
@@ -208,14 +217,33 @@ class ARCShooterGamePlugin(Plugin):
             "description": "射击游戏菜单与离开",
             "usages": ["/gs", "/gs leave", "/gs reload"],
             "permissions": ["arc_shooter_game.command.gs"],
-        }
+        },
+        "addspawn": {
+            "description": "把脚下位置加为指定模式的出生点（自动识别所在地图）",
+            "usages": ["/addspawn <模式> [队伍]"],
+            "permissions": ["arc_shooter_game.command.mapedit"],
+        },
+        "rmspawn": {
+            "description": "删除脚下附近最近的指定模式出生点（自动识别所在地图）",
+            "usages": ["/rmspawn <模式> [队伍]"],
+            "permissions": ["arc_shooter_game.command.mapedit"],
+        },
+        "setrange": {
+            "description": "配置靶场：站在范围两角设 pos1/pos2，站在传送点设 entry；show 查看，clear 清除",
+            "usages": ["/setrange <pos1|pos2|entry|show|clear>"],
+            "permissions": ["arc_shooter_game.command.mapedit"],
+        },
     }
 
     permissions = {
         "arc_shooter_game.command.gs": {
             "description": "允许使用 /gs",
             "default": True,
-        }
+        },
+        "arc_shooter_game.command.mapedit": {
+            "description": "游戏内快捷编辑地图出生点（/addspawn、/rmspawn）",
+            "default": "op",
+        },
     }
 
     def __init__(self):
@@ -240,6 +268,8 @@ class ARCShooterGamePlugin(Plugin):
         # 复活（STATE_PLAYING）的无敌窗不再冻结移速，玩家可自由跑位。
         self._prep_frozen: set[str] = set()
         self._ff_warn_at: Dict[str, float] = {}
+        # 靶场中的玩家：name → 进入时间戳。进入前快照存 self.backups + 磁盘，退出/掉线自动恢复。
+        self.range_players: Dict[str, float] = {}
         self._tick_task = None
         self._fast_tick_task = None
 
@@ -468,9 +498,34 @@ class ARCShooterGamePlugin(Plugin):
             return True
         return bool(getattr(sender, "is_op", False))
 
+    def _resolve_player_for_command_sender(self, sender: CommandSender) -> Optional[Player]:
+        """真实玩家直接返回；经 execute 转发时 sender 可能不是 Player 实例，按名字解析在线玩家（与弧光核心一致）。"""
+        if isinstance(sender, Player):
+            return sender
+        name = str(getattr(sender, "name", "") or "").strip()
+        if "§r" in name:
+            name = name.rsplit("§r", 1)[-1]
+        name = re.sub(r"§.", "", name).strip()
+        if not name:
+            return None
+        try:
+            resolved = self.server.get_player(name)
+            if resolved is not None:
+                return resolved
+        except Exception:
+            pass
+        for online_player in list(getattr(self.server, "online_players", []) or []):
+            if str(getattr(online_player, "name", "") or "").strip().lower() == name.lower():
+                return online_player
+        return None
+
     # ---------- commands ----------
 
     def on_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
+        if command.name in ("addspawn", "rmspawn"):
+            return self._handle_quick_spawn_command(sender, command, args)
+        if command.name == "setrange":
+            return self._handle_setrange_command(sender, command, args)
         if command.name != "gs":
             return False
         sub = args[0].lower() if args else ""
@@ -491,8 +546,11 @@ class ARCShooterGamePlugin(Plugin):
                 sender.send_message(self._t("RELOAD_FAIL").format(e))
             return True
         if not isinstance(sender, Player):
-            sender.send_message(self._t("CMD_PLAYER_ONLY"))
-            return True
+            resolved = self._resolve_player_for_command_sender(sender)
+            if resolved is None:
+                sender.send_message(self._t("CMD_PLAYER_ONLY"))
+                return True
+            sender = resolved
         if sub == "leave":
             self._handle_leave(sender, confirm_match=True)
             return True
@@ -518,6 +576,8 @@ class ARCShooterGamePlugin(Plugin):
     @event_handler
     def on_player_quit(self, event: PlayerQuitEvent):
         player = event.player
+        # 靶场玩家退线：丢弃会话状态即可，快照在磁盘上，重进服时 on_player_join 自动恢复
+        self.range_players.pop(player.name, None)
         lobby = self._lobby_of(player.name)
         if lobby is not None:
             if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
@@ -532,6 +592,11 @@ class ARCShooterGamePlugin(Plugin):
         victim = getattr(event, "actor", None)
         victim_name = _actor_player_name(victim)
         if not victim_name:
+            return
+        if victim_name in self.range_players:
+            # 靶场玩家免伤：测试开火不致死，避免破坏进靶场前的快照
+            if hasattr(event, "is_cancelled"):
+                event.is_cancelled = True
             return
         lobby = self._lobby_of(victim_name)
         if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
@@ -683,6 +748,9 @@ class ARCShooterGamePlugin(Plugin):
             return
         if hasattr(event, "is_cancelled"):
             event.is_cancelled = True
+        if self._in_range(player):
+            self._try_open_range_menu(player)
+            return
         self._try_open_shop(player)
 
     @event_handler
@@ -696,6 +764,9 @@ class ARCShooterGamePlugin(Plugin):
             return
         if hasattr(event, "is_cancelled"):
             event.is_cancelled = True
+        if self._in_range(player):
+            self._try_open_range_menu(player)
+            return
         self._try_open_shop(player)
 
     @event_handler
@@ -730,6 +801,8 @@ class ARCShooterGamePlugin(Plugin):
                 if lobby.state in (STATE_BUYING, STATE_PLAYING):
                     self._send_score_tips(lobby, now)
                     self._enforce_region(lobby)
+            if self.range_players:
+                self._enforce_shooting_range()
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] tick error: {e}\n{traceback.format_exc()}")
 
@@ -812,6 +885,9 @@ class ARCShooterGamePlugin(Plugin):
         if self._lobby_of(player.name) is not None:
             player.send_message(self._t("JOIN_FAIL_IN_GAME"))
             return
+        if self._in_range(player):
+            player.send_message(self._t("RANGE_LEAVE_FIRST"))
+            return
         if not self._playable_maps():
             player.send_message(self._t("CREATE_LOBBY_NO_MAPS"))
             return
@@ -843,6 +919,9 @@ class ARCShooterGamePlugin(Plugin):
     def _join_lobby(self, player: Player, lobby_id: str) -> None:
         if self._lobby_of(player.name) is not None:
             player.send_message(self._t("JOIN_FAIL_IN_GAME"))
+            return
+        if self._in_range(player):
+            player.send_message(self._t("RANGE_LEAVE_FIRST"))
             return
         lobby = self.lobbies.get(lobby_id)
         if lobby is None:
@@ -1416,10 +1495,13 @@ class ARCShooterGamePlugin(Plugin):
                 self._apply_weapon_ammo(player, weapon)
 
     def _restore_player_loadout(self, player: Player, lobby: Lobby, *, gadgets: bool = True) -> None:
-        if self.config_store is None:
-            return
         ps = lobby.players.get(player.name)
         if ps is None:
+            return
+        self._give_loadout_items(player, ps, gadgets=gadgets)
+
+    def _give_loadout_items(self, player: Player, ps: Any, *, gadgets: bool = True) -> None:
+        if self.config_store is None:
             return
         layout = self.config_store.layout()
         reserved = int(layout.get("reserved", 0))
@@ -2817,6 +2899,7 @@ class ARCShooterGamePlugin(Plugin):
         try:
             form = ActionForm(title=self._t("MENU_TITLE"), content=self._t("MENU_CONTENT"))
             form.add_button(self._t("BTN_LOBBY_LIST"), on_click=lambda sender: self._show_lobby_list(sender))
+            form.add_button(self._t("BTN_SHOOTING_RANGE"), on_click=lambda sender: self._enter_shooting_range(sender))
             form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
             form.add_button(self._t("BTN_LEADERBOARD"), on_click=lambda sender: self._show_kd_leaderboard(sender))
             form.add_button(self._t("BTN_PROFILE"), on_click=lambda sender: self._show_profile(sender))
@@ -4173,6 +4256,364 @@ class ARCShooterGamePlugin(Plugin):
         self.config_store.update_map(map_id, updater)
         player.send_message(self._t("SPAWN_REMOVED"))
         self._show_spawn_edit(player, map_id, mode, team_id)
+
+    # ---------- quick spawn commands (/addspawn, /rmspawn) ----------
+
+    def _handle_quick_spawn_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
+        remove = command.name == "rmspawn"
+        player = self._resolve_player_for_command_sender(sender)
+        if player is None:
+            sender.send_message(self._t("CMD_PLAYER_ONLY"))
+            return True
+        if not self._is_op(player):
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return True
+        assert self.config_store is not None
+        args = list(args)
+        # 队伍简写：/addspawn red → 缺省模式按 tdm 处理（红蓝队场景打字最少）
+        if args and str(args[0]).strip().lower() not in KNOWN_MODES and normalize_team_arg(args[0]) is not None:
+            args = ["tdm"] + args
+        mode = str(args[0] if args else "tdm").strip().lower()
+        if mode not in KNOWN_MODES:
+            player.send_message(self._t("SPAWN_CMD_UNKNOWN_MODE").format(mode, "/".join(KNOWN_MODES)))
+            return True
+        team_ids = MODE_SPAWN_TEAMS.get(mode, ("a", "b"))
+        team_id: Optional[str]
+        if team_ids:
+            team_id = normalize_team_arg(args[1] if len(args) > 1 else "")
+            if team_id is None:
+                player.send_message(self._t("SPAWN_CMD_USAGE").format(command.name))
+                return True
+        else:
+            if len(args) > 1:
+                player.send_message(self._t("SPAWN_CMD_MODE_NO_TEAMS").format(self._mode_label(mode), command.name, mode))
+                return True
+            team_id = "a"  # 无队伍模式：出生点统一放 a 池
+        x, y, z, yaw, pitch, dim = _player_location_tuple(player)
+        candidates = find_maps_at_point(self.config_store.maps, x, y, z, dim)
+        if not candidates:
+            player.send_message(self._t("SPAWN_CMD_NOT_IN_REGION"))
+            return True
+        map_cfg = candidates[0]
+        map_id = str(map_cfg.get("id") or "")
+        if remove:
+            self._quick_remove_spawn(player, map_id, mode, team_id, x, y, z)
+        else:
+            self._quick_add_spawn(player, map_id, mode, team_id, x, y, z, yaw, pitch)
+        return True
+
+    def _team_display(self, team_id: str) -> str:
+        name = "红队" if team_id == TEAM_A else "蓝队"
+        return f"{TEAM_NAME_COLOR.get(team_id, '')}{name}"
+
+    def _spawn_target_label(self, mode: str, team_id: Optional[str]) -> str:
+        label = self._mode_label(mode)
+        if team_id and team_id in MODE_SPAWN_TEAMS.get(mode, ("a", "b")):
+            label = f"{label} · {self._team_display(team_id)}"
+        return label
+
+    def _quick_add_spawn(
+        self,
+        player: Player,
+        map_id: str,
+        mode: str,
+        team_id: str,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        pitch: float,
+    ) -> None:
+        assert self.config_store is not None
+        spawn = {"x": x, "y": y, "z": z, "radius": 0, "yaw": yaw, "pitch": pitch}
+
+        def updater(entry: Dict[str, Any]) -> None:
+            mode_cfg = get_mode_config(entry, mode)
+            if mode_cfg is None:
+                mode_cfg = {"mode": mode}  # 其余字段交由 normalize_map 补默认值
+                entry.setdefault("modes", []).append(mode_cfg)
+            teams = mode_cfg.setdefault("teams", {})
+            team = teams.setdefault(team_id, {"name": "红队" if team_id == TEAM_A else "蓝队", "spawns": []})
+            team.setdefault("spawns", []).append(spawn)
+
+        self.config_store.update_map(map_id, updater)
+        updated = self.config_store.maps.get(map_id) or {}
+        team = ((get_mode_config(updated, mode) or {}).get("teams") or {}).get(team_id) or {}
+        count = len(team.get("spawns") or [])
+        player.send_message(
+            self._t("SPAWN_CMD_ADDED").format(
+                self._spawn_target_label(mode, team_id),
+                str(updated.get("display_name") or map_id),
+                x,
+                y,
+                z,
+                count,
+            )
+        )
+        self._sync_lobbies_for_map(map_id)
+
+    def _quick_remove_spawn(
+        self,
+        player: Player,
+        map_id: str,
+        mode: str,
+        team_id: str,
+        x: float,
+        y: float,
+        z: float,
+    ) -> None:
+        assert self.config_store is not None
+        map_cfg = self.config_store.maps.get(map_id) or {}
+        mode_cfg = get_mode_config(map_cfg, mode) or {}
+        teams = mode_cfg.get("teams") or {}
+        if MODE_SPAWN_TEAMS.get(mode):
+            pool_ids = [team_id]  # 红蓝队模式：只删指定队伍的点
+        else:
+            pool_ids = ["a", "b"]  # 无队伍模式：两个池都找，删全局最近的一个
+        best = None  # (距离, 池id, 下标)
+        for pool_id in pool_ids:
+            found = nearest_spawn_index(list((teams.get(pool_id) or {}).get("spawns") or []), x, y, z)
+            if found is not None and (best is None or found[1] < best[0]):
+                best = (found[1], pool_id, found[0])
+        if best is None or best[0] > SPAWN_CMD_REMOVE_RADIUS:
+            nearest = f"{best[0]:.1f} 格" if best is not None else self._t("SPAWN_CMD_NEAREST_NONE")
+            player.send_message(
+                self._t("SPAWN_CMD_NONE_NEARBY").format(
+                    SPAWN_CMD_REMOVE_RADIUS,
+                    self._spawn_target_label(mode, team_id),
+                    nearest,
+                )
+            )
+            return
+        dist, pool_id, index = best
+        old_spawns = list((teams.get(pool_id) or {}).get("spawns") or [])
+        removed = old_spawns[index] if 0 <= index < len(old_spawns) else {}
+        remaining = max(0, len(old_spawns) - 1)
+
+        def updater(entry: Dict[str, Any]) -> None:
+            mode_cfg2 = get_mode_config(entry, mode)
+            if mode_cfg2 is None:
+                return
+            team = (mode_cfg2.get("teams") or {}).get(pool_id)
+            if not team:
+                return
+            spawns = list(team.get("spawns") or [])
+            if 0 <= index < len(spawns):
+                spawns.pop(index)
+            team["spawns"] = spawns
+
+        self.config_store.update_map(map_id, updater)
+        player.send_message(
+            self._t("SPAWN_CMD_REMOVED").format(
+                self._spawn_target_label(mode, team_id),
+                float(removed.get("x", 0)),
+                float(removed.get("y", 0)),
+                float(removed.get("z", 0)),
+                remaining,
+            )
+        )
+        self._sync_lobbies_for_map(map_id)
+
+    # ---------- shooting range（靶场） ----------
+
+    def _handle_setrange_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
+        player = self._resolve_player_for_command_sender(sender)
+        if player is None:
+            sender.send_message(self._t("CMD_PLAYER_ONLY"))
+            return True
+        if not self._is_op(player):
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return True
+        if self.config_store is None:
+            player.send_message(self._t("PANEL_ERROR"))
+            return True
+        sub = str(args[0] if args else "").strip().lower()
+        if sub in ("pos1", "pos2"):
+            x, y, z, _yaw, _pitch, dim = _player_location_tuple(player)
+            self.config_store.set_range_part(sub, {"x": x, "y": y, "z": z}, dim)
+            player.send_message(self._t("RANGE_SET_OK").format(sub, x, y, z))
+            return True
+        if sub == "entry":
+            x, y, z, yaw, pitch, dim = _player_location_tuple(player)
+            self.config_store.set_range_part("entry", {"x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch}, dim)
+            player.send_message(self._t("RANGE_SET_OK").format("entry", x, y, z))
+            return True
+        if sub == "show":
+            cfg = self.config_store.get_range()
+            if cfg is None:
+                player.send_message(self._t("RANGE_SHOW_NONE"))
+                return True
+            pos1, pos2, entry = cfg["region"]["pos1"], cfg["region"]["pos2"], cfg["entry"]
+            player.send_message(
+                self._t("RANGE_SHOW").format(
+                    cfg["dimension"],
+                    pos1["x"], pos1["y"], pos1["z"],
+                    pos2["x"], pos2["y"], pos2["z"],
+                    entry["x"], entry["y"], entry["z"],
+                )
+            )
+            return True
+        if sub == "clear":
+            self.config_store.clear_range()
+            player.send_message(self._t("RANGE_CLEARED"))
+            return True
+        player.send_message(self._t("RANGE_USAGE"))
+        return True
+
+    def _range_cfg(self) -> Optional[Dict[str, Any]]:
+        if self.config_store is None:
+            return None
+        return self.config_store.get_range()
+
+    def _in_range(self, player: Optional[Player]) -> bool:
+        name = self._player_name(player) if player is not None else ""
+        return bool(name) and name in self.range_players
+
+    def _enter_shooting_range(self, player: Player) -> None:
+        cfg = self._range_cfg()
+        if cfg is None:
+            player.send_message(self._t("RANGE_NOT_CONFIGURED"))
+            return
+        if self._lobby_of(player.name) is not None:
+            player.send_message(self._t("JOIN_FAIL_IN_GAME"))
+            return
+        if self._in_range(player):
+            # 已在靶场：视为传回靶场入口
+            entry = cfg["entry"]
+            self._tp_player(
+                player.name, float(entry["x"]), float(entry["y"]), float(entry["z"]),
+                str(cfg["dimension"]), entry.get("yaw"), entry.get("pitch"),
+            )
+            player.send_message(self._t("RANGE_ALREADY_IN"))
+            return
+        if self._is_probably_dead(player):
+            player.send_message(self._t("RANGE_ENTER_FAIL_DEAD"))
+            return
+        # 与对局相同的快照流程：进靶场前的背包/位置存 self.backups + 磁盘，退出/掉线自动恢复
+        snap = snapshot_player(player, dimension_id_of(player.location))
+        self.backups[player.name] = snap
+        try:
+            save_snapshot_disk(player.name, snap)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] range backup disk fail for {player.name}: {e}")
+        self._clear_player(player.name)
+        self._set_gamemode(player.name, "0")
+        try:
+            if hasattr(player, "health"):
+                player.health = getattr(player, "max_health", 20) or 20
+        except Exception:
+            pass
+        self.range_players[player.name] = time.time()
+        entry = cfg["entry"]
+        self._tp_player(
+            player.name, float(entry["x"]), float(entry["y"]), float(entry["z"]),
+            str(cfg["dimension"]), entry.get("yaw"), entry.get("pitch"),
+        )
+        self._give_range_loadout(player, announce=False)
+        player.send_message(self._t("RANGE_ENTERED"))
+
+    def _show_range_menu(self, player: Player) -> None:
+        if not self._in_range(player):
+            return
+        form = ActionForm(title=self._t("RANGE_MENU_TITLE"), content=self._t("RANGE_MENU_CONTENT"))
+        form.add_button(self._t("RANGE_BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
+        form.add_button(
+            self._t("RANGE_BTN_REGIVE"),
+            on_click=lambda sender: self._give_range_loadout(sender, announce=True),
+        )
+        form.add_button(self._t("RANGE_BTN_ENTRY"), on_click=lambda sender: self._range_tp_to_entry(sender))
+        form.add_button(self._t("RANGE_BTN_EXIT"), on_click=lambda sender: self._exit_range(sender))
+        form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
+        player.send_form(form)
+
+    def _range_tp_to_entry(self, player: Player) -> None:
+        cfg = self._range_cfg()
+        if cfg is None or not self._in_range(player):
+            return
+        entry = cfg["entry"]
+        self._tp_player(
+            player.name, float(entry["x"]), float(entry["y"]), float(entry["z"]),
+            str(cfg["dimension"]), entry.get("yaw"), entry.get("pitch"),
+        )
+
+    def _try_open_range_menu(self, player: Player) -> bool:
+        now = time.time()
+        last = self._shop_open_at.get(player.name, 0.0)
+        if now - last < SHOP_DEBOUNCE_SECONDS:
+            return True
+        self._shop_open_at[player.name] = now
+        self._show_range_menu(player)
+        return True
+
+    def _give_range_loadout(self, player: Player, *, announce: bool = False) -> None:
+        """按玩家当前军械库预设（经等级/槽位清洗）发放测试武器 + 弧光币。"""
+        if self.config_store is None:
+            return
+        ps = PlayerState(name=player.name, team=TEAM_A, points=0)
+        weapons = self.config_store.weapons
+        defaults = self._default_weapons()
+        saved = None
+        if self.loadout_store is not None:
+            saved = self.loadout_store.get(player.name, defaults=defaults)
+        try:
+            strategy = resolve_acquire_strategy(key=ACQUIRE_ARMORY)
+            strategy.assign_on_match_start(
+                ps,
+                weapons,
+                None,
+                defaults=defaults,
+                saved_loadout=saved,
+                player_level=self._player_level(player.name),
+                gadget_slots=self._gadget_slot_count(),
+            )
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] range loadout assign: {e}\n{traceback.format_exc()}")
+            return
+        self._clear_player(player.name)
+        self._give_loadout_items(player, ps)
+        name = self._player_name(player)
+        try:
+            self.server.scheduler.run_task(
+                self, lambda p=name: self._apply_range_ammo_by_name(p, ps), delay=3,
+            )
+        except Exception:
+            if self._is_valid_player(player):
+                self._apply_owned_weapon_ammo(player, ps)
+        if announce:
+            player.send_message(self._t("RANGE_LOADOUT_REGIVEN"))
+
+    def _apply_range_ammo_by_name(self, player_name: str, ps: Any) -> None:
+        player = self._get_player(player_name)
+        if player is None or not self._in_range(player):
+            return
+        self._apply_owned_weapon_ammo(player, ps)
+
+    def _exit_range(self, player: Player) -> None:
+        self.range_players.pop(player.name, None)
+        # after_match=True：先清靶场物品再还原进入前快照（含传送回原位置、恢复游戏模式）
+        self._restore_player(player, force=True, after_match=True)
+        player.send_message(self._t("RANGE_EXITED"))
+
+    def _enforce_shooting_range(self) -> None:
+        cfg = self._range_cfg()
+        if cfg is None or not self.range_players:
+            return
+        dim = str(cfg["dimension"] or "overworld")
+        region_like = {"region": cfg["region"]}
+        entry = cfg["entry"]
+        for name in list(self.range_players.keys()):
+            player = self._get_player(name)
+            if player is None:
+                continue
+            loc = player.location
+            if dimension_id_of(loc) != dim or not point_in_region(
+                region_like, float(loc.x), float(loc.y), float(loc.z)
+            ):
+                self._tp_player(
+                    name, float(entry["x"]), float(entry["y"]), float(entry["z"]),
+                    dim, entry.get("yaw"), entry.get("pitch"),
+                )
+                player.send_message(self._t("RANGE_PULLBACK"))
 
     def _show_mode_settings_form(self, player: Player, map_id: str, mode: str) -> None:
         assert self.config_store is not None

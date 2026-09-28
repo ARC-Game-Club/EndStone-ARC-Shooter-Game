@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,22 @@ from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
 IMPLEMENTED_MODES = {"tdm"}
 KNOWN_MODES = ("tdm", "ffa", "ctf")
+# 各模式的出生点队伍结构：红蓝队模式为 ("a","b")；无队伍模式为空元组（出生点统一进 a 池）。
+MODE_SPAWN_TEAMS: Dict[str, Tuple[str, ...]] = {
+    "tdm": ("a", "b"),
+    "ctf": ("a", "b"),
+    "ffa": (),
+}
+TEAM_ARG_ALIASES = {
+    "a": "a",
+    "red": "a",
+    "红": "a",
+    "红队": "a",
+    "b": "b",
+    "blue": "b",
+    "蓝": "b",
+    "蓝队": "b",
+}
 WEAPON_TYPES = ("primary", "secondary", "melee", "gadget", "armor")
 WEAPON_CATEGORIES = (
     "assault_rifle",
@@ -610,6 +627,34 @@ def normalize_map(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def normalize_range_cfg(raw: Any) -> Optional[Dict[str, Any]]:
+    """靶场配置归一：region 两角点 + entry 传送点齐备才可用；返回 None 表示未配置/不完整。"""
+    if not isinstance(raw, dict):
+        return None
+    region = raw.get("region") if isinstance(raw.get("region"), dict) else {}
+    pos1 = _normalize_point(region.get("pos1"))
+    pos2 = _normalize_point(region.get("pos2"))
+    entry_in = raw.get("entry") if isinstance(raw.get("entry"), dict) else {}
+    if pos1 is None or pos2 is None or not _has_xyz(entry_in):
+        return None
+    try:
+        yaw = float(entry_in.get("yaw") or 0)
+        pitch = float(entry_in.get("pitch") or 0)
+    except (TypeError, ValueError):
+        yaw, pitch = 0.0, 0.0
+    return {
+        "dimension": str(raw.get("dimension") or "overworld").strip() or "overworld",
+        "region": {"pos1": pos1, "pos2": pos2},
+        "entry": {
+            "x": float(entry_in["x"]),
+            "y": float(entry_in["y"]),
+            "z": float(entry_in["z"]),
+            "yaw": yaw,
+            "pitch": pitch,
+        },
+    }
+
+
 def validate_map(raw: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     if not isinstance(raw, dict):
@@ -651,6 +696,56 @@ def point_in_region(map_cfg: Dict[str, Any], x: float, y: float, z: float) -> bo
         return True
     x1, x2, y1, y2, z1, z2 = bounds
     return x1 <= x <= x2 and y1 <= y <= y2 and z1 <= z <= z2
+
+
+def normalize_team_arg(raw: Any) -> Optional[str]:
+    """red/红/红队/a → "a"；blue/蓝/蓝队/b → "b"；其余返回 None。"""
+    key = str(raw or "").strip().lower()
+    return TEAM_ARG_ALIASES.get(key)
+
+
+def find_maps_at_point(
+    maps: Dict[str, Dict[str, Any]],
+    x: float,
+    y: float,
+    z: float,
+    dimension: str,
+) -> List[Dict[str, Any]]:
+    """维度一致且 region 覆盖该点的地图，region 体积小者在前（重叠时最具体的一张优先）。"""
+    hits: List[Dict[str, Any]] = []
+    for entry in maps.values():
+        if str(entry.get("dimension") or "overworld") != str(dimension or "overworld"):
+            continue
+        if not has_region(entry) or not point_in_region(entry, float(x), float(y), float(z)):
+            continue
+        hits.append(entry)
+
+    def _volume(map_cfg: Dict[str, Any]) -> float:
+        bounds = region_bounds(map_cfg)
+        if bounds is None:
+            return float("inf")
+        return (bounds[1] - bounds[0]) * (bounds[3] - bounds[2]) * (bounds[5] - bounds[4])
+
+    hits.sort(key=_volume)
+    return hits
+
+
+def nearest_spawn_index(spawns: Any, x: float, y: float, z: float) -> Optional[Tuple[int, float]]:
+    """返回 (下标, 欧氏距离)；无有效出生点时返回 None。"""
+    best: Optional[Tuple[int, float]] = None
+    for idx, spawn in enumerate(spawns or []):
+        if not isinstance(spawn, dict):
+            continue
+        try:
+            dx = float(spawn["x"]) - float(x)
+            dy = float(spawn["y"]) - float(y)
+            dz = float(spawn["z"]) - float(z)
+        except (KeyError, TypeError, ValueError):
+            continue
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if best is None or dist < best[1]:
+            best = (idx, dist)
+    return best
 
 
 def get_mode_config(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
@@ -1272,6 +1367,39 @@ class ConfigStore:
             return False
         del self.maps[map_id]
         return self.map_db.delete_map(map_id)
+
+    # ---------- shooting range（靶场，settings.yml 单键 JSON） ----------
+
+    def get_range(self) -> Optional[Dict[str, Any]]:
+        raw = self.settings.GetSetting("SHOOTING_RANGE") or ""
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return normalize_range_cfg(data)
+
+    def set_range_part(self, key: str, value: Dict[str, Any], dimension: str) -> None:
+        """key ∈ pos1/pos2/entry；dimension 随每次写入覆盖记录（取设置者当前维度）。"""
+        raw = self.settings.GetSetting("SHOOTING_RANGE") or ""
+        try:
+            data = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        region = data.get("region") if isinstance(data.get("region"), dict) else {}
+        if key in ("pos1", "pos2"):
+            region[key] = value
+            data["region"] = region
+        else:
+            data[key] = value
+        data["dimension"] = str(dimension or "overworld").strip() or "overworld"
+        self.settings.SetSetting("SHOOTING_RANGE", json.dumps(data, ensure_ascii=False))
+
+    def clear_range(self) -> None:
+        self.settings.SetSetting("SHOOTING_RANGE", "")
 
     def _load_json_list(
         self,

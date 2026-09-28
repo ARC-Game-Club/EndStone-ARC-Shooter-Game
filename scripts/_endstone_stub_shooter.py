@@ -39,6 +39,9 @@ evt_mod = _mod("endstone.event")
 
 
 def event_handler(*a, **k):
+    # 支持裸装饰 @event_handler 与带参 @event_handler(priority=...) 两种形式（与真 endstone 一致）
+    if len(a) == 1 and callable(a[0]) and not k:
+        return a[0]
     def deco(fn):
         return fn
     return deco

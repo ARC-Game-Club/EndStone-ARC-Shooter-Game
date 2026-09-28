@@ -7,13 +7,17 @@ from pathlib import Path
 from endstone_arc_shooter_game.config import (
     ConfigStore,
     build_runtime_map_cfg,
+    find_maps_at_point,
     map_incomplete_reasons,
     migrate_legacy_map,
     match_kd_score,
     mode_incomplete_reasons,
     mode_playable,
+    nearest_spawn_index,
     normalize_map,
+    normalize_team_arg,
     normalize_weapon,
+    normalize_range_cfg,
     playable_modes,
     point_in_region,
     slot_layout,
@@ -995,6 +999,106 @@ class ArmoryLevelTests(unittest.TestCase):
         self.assertEqual(ps.secondary_id, "m1911")
         self.assertEqual(ps.melee_id, "silencefd")
         self.assertEqual(ps.gadgets, ["mk2_grenade"])
+
+
+class QuickSpawnHelperTests(unittest.TestCase):
+    """find_maps_at_point / nearest_spawn_index / normalize_team_arg。"""
+
+    def _map(self, map_id, dimension="overworld", pos1=(0, 0, 0), pos2=(10, 10, 10)):
+        return normalize_map(
+            {
+                "id": map_id,
+                "display_name": map_id,
+                "dimension": dimension,
+                "region": {
+                    "pos1": {"x": pos1[0], "y": pos1[1], "z": pos1[2]},
+                    "pos2": {"x": pos2[0], "y": pos2[1], "z": pos2[2]},
+                },
+                "modes": [],
+            }
+        )
+
+    def test_find_maps_at_point_filters_dimension_and_region(self):
+        maps = {
+            "a": self._map("a"),
+            "b": self._map("b", dimension="nether"),
+            "c": self._map("c", pos1=(100, 0, 100), pos2=(110, 10, 110)),
+            "d": self._map("d"),
+        }
+        maps["d"]["region"] = {"pos1": None, "pos2": None}  # 无 region 的图不入候选
+        hits = find_maps_at_point(maps, 5, 5, 5, "overworld")
+        self.assertEqual([m["id"] for m in hits], ["a"])
+
+    def test_find_maps_at_point_smallest_region_first(self):
+        maps = {
+            "big": self._map("big", pos1=(0, 0, 0), pos2=(100, 100, 100)),
+            "small": self._map("small", pos1=(0, 0, 0), pos2=(5, 5, 5)),
+        }
+        hits = find_maps_at_point(maps, 1, 1, 1, "overworld")
+        self.assertEqual([m["id"] for m in hits], ["small", "big"])
+
+    def test_nearest_spawn_index(self):
+        spawns = [
+            {"x": 10, "y": 0, "z": 0},
+            {"x": 1, "y": 0, "z": 0},
+            {"x": 5, "y": 5, "z": 5},
+        ]
+        idx, dist = nearest_spawn_index(spawns, 0, 0, 0)
+        self.assertEqual(idx, 1)
+        self.assertAlmostEqual(dist, 1.0)
+        self.assertIsNone(nearest_spawn_index([], 0, 0, 0))
+
+    def test_normalize_team_arg(self):
+        self.assertEqual(normalize_team_arg("red"), "a")
+        self.assertEqual(normalize_team_arg("红队"), "a")
+        self.assertEqual(normalize_team_arg("Blue"), "b")
+        self.assertEqual(normalize_team_arg("蓝"), "b")
+        self.assertEqual(normalize_team_arg("b"), "b")
+        self.assertIsNone(normalize_team_arg("green"))
+        self.assertIsNone(normalize_team_arg(None))
+
+
+class RangeCfgTests(unittest.TestCase):
+    """normalize_range_cfg：靶场配置归一与完整性校验。"""
+
+    def test_full_cfg_normalized(self):
+        cfg = normalize_range_cfg(
+            {
+                "dimension": "overworld",
+                "region": {
+                    "pos1": {"x": 0, "y": 64, "z": 0},
+                    "pos2": {"x": 50, "y": 80, "z": 50},
+                },
+                "entry": {"x": 25, "y": 70, "z": 25},
+            }
+        )
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg["dimension"], "overworld")
+        self.assertEqual(cfg["entry"]["x"], 25.0)
+        self.assertEqual(cfg["entry"]["yaw"], 0.0)
+        self.assertEqual(cfg["entry"]["pitch"], 0.0)
+
+    def test_entry_yaw_pitch_kept(self):
+        cfg = normalize_range_cfg(
+            {
+                "region": {"pos1": {"x": 0, "y": 0, "z": 0}, "pos2": {"x": 1, "y": 1, "z": 1}},
+                "entry": {"x": 0.5, "y": 1, "z": 0.5, "yaw": 180, "pitch": -10},
+            }
+        )
+        self.assertEqual(cfg["entry"]["yaw"], 180.0)
+        self.assertEqual(cfg["entry"]["pitch"], -10.0)
+
+    def test_incomplete_cfg_rejected(self):
+        pos = {"x": 0, "y": 0, "z": 0}
+        self.assertIsNone(normalize_range_cfg(None))
+        self.assertIsNone(normalize_range_cfg({}))
+        self.assertIsNone(normalize_range_cfg({"region": {"pos1": pos, "pos2": pos}}))
+        self.assertIsNone(normalize_range_cfg({"entry": pos}))
+        self.assertIsNone(
+            normalize_range_cfg(
+                {"region": {"pos1": pos, "pos2": None}, "entry": pos}
+            )
+        )
 
 
 if __name__ == "__main__":
