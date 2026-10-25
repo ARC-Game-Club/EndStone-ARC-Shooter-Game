@@ -215,7 +215,12 @@ class ARCShooterGamePlugin(Plugin):
     commands = {
         "gs": {
             "description": "射击游戏菜单与离开",
-            "usages": ["/gs", "/gs leave", "/gs reload"],
+            "usages": [
+                "/gs",
+                "/gs quick",
+                "/gs leave",
+                "/gs reload",
+            ],
             "permissions": ["arc_shooter_game.command.gs"],
         },
         "addspawn": {
@@ -282,6 +287,21 @@ class ARCShooterGamePlugin(Plugin):
             self.logger.info(message)
         else:
             print(f"[{level.upper()}] {message}")
+
+    def _send_form(self, player: Player, form: Any) -> None:
+        """安全发表单。
+
+        模拟玩家（AI 假人）没有客户端，收不了表单——`send_form` 对它们
+        可能抛异常也可能静默丢弃。统一从这里走：假人直接跳过、异常兜住。
+        否则 AI 走 `/gs quick` 这类无 UI 路径时，会在"加入对局"半路
+        被一张菜单表单打断。
+        """
+        try:
+            if not str(getattr(player, "xuid", "") or "").strip():
+                return          # xuid 为空 = 模拟玩家：无客户端
+            player.send_form(form)
+        except Exception:
+            pass
 
     def _t(self, key: str) -> str:
         if self.language_manager is None:
@@ -554,11 +574,146 @@ class ARCShooterGamePlugin(Plugin):
         if sub == "leave":
             self._handle_leave(sender, confirm_match=True)
             return True
-        if sub and sub not in ("leave",):
+        if sub == "quick":
+            # 快速开始：给 AI 玩家/急性子真人用——有房就进，没房就开
+            # （随机地图+模式）。纯命令路径，不弹任何表单。
+            self._handle_quick_join(sender)
+            return True
+        if sub and sub not in ("leave", "quick"):
             sender.send_message(self._t("CMD_UNKNOWN_SUB").format(sub))
             return True
         self._show_root_menu(sender)
         return True
+
+    def _handle_quick_join(self, player: Player) -> None:
+        """快速开始：立刻加入一个能进的房间；没有就创建一间。
+
+        选择顺序：
+          1. 还在等待/倒计时中的房间（凑齐就自动开局）
+          2. 进行中的对局（中途加入，自动分队发装备）
+          3. 都没有 → 创建新房（随机地图 + 随机模式）
+
+        全程不弹表单——这条路径专门保证**无 UI** 也能用
+        （AI 模拟玩家点不了表单；脚本/调度也一样）。
+        """
+        if self._lobby_of(player.name) is not None:
+            player.send_message(self._t("JOIN_FAIL_IN_GAME"))
+            return
+        pick = None
+        for lobby in self.lobbies.values():
+            ok, _reason = lobby.can_join()
+            if ok and lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
+                pick = lobby
+                break
+        if pick is None:
+            for lobby in self.lobbies.values():
+                ok, _reason = lobby.can_join()
+                if ok:
+                    pick = lobby
+                    break
+        if pick is not None:
+            player.send_message(
+                f"§a快速加入房间 {pick.display_name}（{self._lobby_map_label(pick)} · "
+                f"{self._lobby_mode_label(pick)}）")
+            self._join_lobby(player, pick.lobby_id)
+            self._quick_autostart(pick)
+            return
+        if not self._playable_maps():
+            player.send_message(self._t("CREATE_LOBBY_NO_MAPS"))
+            return
+        player.send_message("§a没有可加入的房间，已为你创建新房（随机地图/模式）")
+        self._create_lobby(player)
+        lobby = self._lobby_of(player.name)
+        if lobby is not None:
+            self._quick_autostart(lobby)
+
+    def _quick_autostart(self, lobby: Lobby) -> None:
+        """快速开始路径的自动开局。
+
+        `/gs quick` 的语义就是"马上玩"：等在房间里没人点开始的话，
+        房间会一直挂着。人齐（两队都有人）就自动倒计时开局。
+        由 quick 进来的玩家已经表达了"立刻开打"的意愿；真人手动
+        建的房间维持原样（仍由房主手动开始），只有 quick 触发过加入
+        的房间才自动开。
+        """
+        try:
+            if lobby.state != STATE_LOBBY or not lobby.teams_ready_to_start():
+                return
+            starter = self._get_player(lobby.admin or "")
+            if starter is None:
+                # 房主不在（比如房主是刚走的假人）——拿任意在线成员顶上
+                for ps in lobby.online_players():
+                    member = self._get_player(ps.name)
+                    if member is not None:
+                        starter = member
+                        break
+            if starter is None:
+                return
+            self._start_match(starter, lobby)
+            self._safe_log("info",
+                           f"[ARCShooterGame] quick 房间 {lobby.lobby_id} 人齐自动开局")
+        except Exception as exc:
+            self._safe_log("warning", f"[ARCShooterGame] quick 自动开局失败: {exc}")
+
+    def api_lobby_info(self, player_name: str) -> Dict[str, Any]:
+        """查询某玩家在枪战里的状态（给 AI 假人插件辨敌我用）。
+
+        返回 {"ok", "state", "team", "enemies": [对方队伍玩家名],
+        "match_seconds"}。不在房间时 ok=False。队伍名牌平时是隐藏的，
+        外部插件没法靠名牌辨队——只能从这里问。
+        """
+        try:
+            name = str(player_name or "")
+            lobby = self._lobby_of(name)
+            if lobby is None:
+                return {"ok": False, "text": "不在房间"}
+            ps = lobby.players.get(name)
+            my_team = str(getattr(ps, "team", "") or "")
+            enemies = [str(p.name) for p in lobby.online_players()
+                       if str(getattr(p, "team", "")) != my_team]
+            return {
+                "ok": True,
+                "state": lobby.state,
+                "team": my_team,
+                "enemies": enemies,
+                "match_seconds": int(lobby.match_time_seconds or 300),
+            }
+        except Exception as exc:
+            return {"ok": False, "text": f"api_lobby_info: {exc}"}
+
+    def api_leave(self, player: Any) -> Dict[str, Any]:
+        """给其他插件调用的离开接口（房间/对局都适用）。主线程调用。"""
+        try:
+            name = str(getattr(player, "name", "") or "")
+            lobby = self._lobby_of(name)
+            if lobby is None:
+                return {"ok": False, "text": f"{name} 不在任何房间里"}
+            self._handle_leave(player, confirm_match=True)
+            return {"ok": True, "text": "已离开"}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_leave: {exc}"}
+
+    def api_quick_join(self, player: Any) -> Dict[str, Any]:
+        """给其他插件（如 AI 假人插件）调用的快速开始接口。
+
+        在**主线程**调用，传在线 Player 对象。返回 {"ok": bool, "text": str}。
+        """
+        try:
+            name = str(getattr(player, "name", "") or "")
+            if not name:
+                return {"ok": False, "text": "player 无效"}
+            if self._get_player(name) is None:
+                return {"ok": False, "text": f"{name} 不在线"}
+            self._handle_quick_join(player)
+            lobby = self._lobby_of(name)
+            if lobby is None:
+                return {"ok": False, "text": "加入失败（没有可用地图或房间已满）"}
+            return {"ok": True,
+                    "text": f"已进入房间 {lobby.display_name} "
+                            f"({self._lobby_map_label(lobby)} · "
+                            f"{self._lobby_mode_label(lobby)})"}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_quick_join: {exc}"}
 
     # ---------- events ----------
 
@@ -2146,7 +2301,7 @@ class ARCShooterGamePlugin(Plugin):
         try:
             form = ActionForm(title=self._t("MATCH_END_TITLE"), content=content)
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] match result form: {e}\n{traceback.format_exc()}")
             for line in content.splitlines():
@@ -2914,7 +3069,7 @@ class ARCShooterGamePlugin(Plugin):
                     on_click=lambda sender: self._set_team_default_armor(sender, TEAM_B),
                 )
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] root menu: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -2996,7 +3151,7 @@ class ARCShooterGamePlugin(Plugin):
                     on_click=lambda sender, p=page + 1: self._show_kd_leaderboard(sender, p),
                 )
             form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] leaderboard: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -3054,7 +3209,7 @@ class ARCShooterGamePlugin(Plugin):
                 content=self._profile_content(stats),
             )
             form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] profile: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -3076,7 +3231,7 @@ class ARCShooterGamePlugin(Plugin):
                 form.add_button(label, on_click=lambda sender, i=lid: self._join_lobby(sender, i))
             form.add_button(self._t("BTN_CREATE_LOBBY"), on_click=lambda sender: self._create_lobby(sender))
             form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] lobby list: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -3112,7 +3267,7 @@ class ARCShooterGamePlugin(Plugin):
                 form.add_button(self._t("BTN_KICK"), on_click=lambda sender, lb=lobby: self._show_kick_menu(sender, lb))
             form.add_button(self._t("BTN_LEAVE"), on_click=lambda sender: self._handle_leave(sender, confirm_match=False))
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] lobby menu: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -3143,14 +3298,14 @@ class ARCShooterGamePlugin(Plugin):
                 on_click=lambda sender, lb=lobby: self._select_random_map_mode(sender, lb),
             )
             form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-            player.send_form(form)
+            self._send_form(player, form)
             return
         for map_cfg in candidates:
             label = self._map_select_button_label(map_cfg)
             mid = map_cfg["id"]
             form.add_button(label, on_click=lambda sender, lb=lobby, m=mid: self._select_map(sender, lb, m))
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _map_display_name(self, map_id: Optional[str]) -> str:
         if not map_id or self.config_store is None:
@@ -3246,7 +3401,7 @@ class ARCShooterGamePlugin(Plugin):
         if not modes:
             form = ActionForm(title=self._t("MODE_SELECT_TITLE"), content=self._t("MODE_SELECT_EMPTY"))
             form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-            player.send_form(form)
+            self._send_form(player, form)
             return
         form = ActionForm(
             title=self._t("MODE_SELECT_TITLE"),
@@ -3256,7 +3411,7 @@ class ARCShooterGamePlugin(Plugin):
             label = self._t("MODE_SELECT_BUTTON").format(self._mode_label(mode))
             form.add_button(label, on_click=lambda sender, lb=lobby, m=mode: self._select_mode(sender, lb, m))
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _select_mode(self, player: Player, lobby: Lobby, mode: str) -> None:
         assert self.config_store is not None
@@ -3295,7 +3450,7 @@ class ARCShooterGamePlugin(Plugin):
                 on_click=lambda sender, n=ps.name, lb=lobby: self._toggle_team(sender, lb, n),
             )
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _toggle_team(self, player: Player, lobby: Lobby, target_name: str) -> None:
         ps = lobby.players.get(target_name)
@@ -3324,7 +3479,7 @@ class ARCShooterGamePlugin(Plugin):
         for ps in lobby.online_players():
             form.add_button(ps.name, on_click=lambda sender, n=ps.name, lb=lobby: self._kick_player(sender, lb, n))
         form.add_button(self._t("BACK"), on_click=lambda sender, lb=lobby: self._show_lobby_menu(sender, lb))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _kick_player(self, admin: Player, lobby: Lobby, target_name: str) -> None:
         if target_name == admin.name:
@@ -3368,7 +3523,7 @@ class ARCShooterGamePlugin(Plugin):
             form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
         form.add_button(self._t("BTN_LEAVE_MATCH"), on_click=lambda sender: self._show_leave_match_confirm(sender))
         form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_leave_match_confirm(self, player: Player) -> None:
         form = ActionForm(
@@ -3380,7 +3535,7 @@ class ARCShooterGamePlugin(Plugin):
             on_click=lambda sender: self._handle_leave(sender, confirm_match=False),
         )
         form.add_button(self._t("BTN_CANCEL"), on_click=lambda sender: None)
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_shop(self, player: Player) -> None:
         lobby = self._lobby_of(player.name)
@@ -3415,7 +3570,7 @@ class ARCShooterGamePlugin(Plugin):
         form.add_button(self._t("SHOP_ARMOR"), on_click=lambda sender: self._show_shop_category(sender, "armor"))
         form.add_button(self._t("SHOP_GADGET"), on_click=lambda sender: self._show_shop_category(sender, "gadget"))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_shop_category(self, player: Player, weapon_type: str) -> None:
         lobby = self._lobby_of(player.name)
@@ -3458,7 +3613,7 @@ class ARCShooterGamePlugin(Plugin):
                 on_click=lambda sender, t=weapon_type, c=cat: self._show_shop_weapons(sender, t, c),
             )
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_shop(sender))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_shop_weapons(self, player: Player, weapon_type: str, category: str) -> None:
         lobby = self._lobby_of(player.name)
@@ -3501,7 +3656,7 @@ class ARCShooterGamePlugin(Plugin):
                 self._t("BACK"),
                 on_click=lambda sender, t=weapon_type: self._show_shop_category(sender, t),
             )
-            player.send_form(form)
+            self._send_form(player, form)
             return
         owned = owned_weapon_ids(ps)
         capacities = self._slot_capacities()
@@ -3534,7 +3689,7 @@ class ARCShooterGamePlugin(Plugin):
             self._t("BACK"),
             on_click=lambda sender, t=weapon_type: self._show_shop_category(sender, t),
         )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _category_label(self, category: str) -> str:
         key = f"CATEGORY_{category}"
@@ -3644,7 +3799,7 @@ class ARCShooterGamePlugin(Plugin):
                 form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
             else:
                 form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] armory: {e}\n{traceback.format_exc()}")
             player.send_message(self._t("PANEL_ERROR"))
@@ -3750,7 +3905,7 @@ class ARCShooterGamePlugin(Plugin):
                             sender, "gadget", idx
                         ),
                     )
-            player.send_form(form)
+            self._send_form(player, form)
         except Exception as e:
             self._safe_log(
                 "error",
@@ -3788,7 +3943,7 @@ class ARCShooterGamePlugin(Plugin):
                 self._t("BACK"),
                 on_click=lambda sender: self._show_armory_preset_edit(sender),
             )
-            player.send_form(form)
+            self._send_form(player, form)
             return
         form = ActionForm(
             title=self._t("ARMORY_PICK_CATEGORY").format(label),
@@ -3806,7 +3961,7 @@ class ARCShooterGamePlugin(Plugin):
                     sender, s, c, i
                 ),
             )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_armory_weapons(
         self, player: Player, slot: str, category: str, index: int = 0
@@ -3858,7 +4013,7 @@ class ARCShooterGamePlugin(Plugin):
                 sender, s, None, i, 0, True
             ),
         )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _armory_pick(
         self,
@@ -3937,7 +4092,7 @@ class ARCShooterGamePlugin(Plugin):
             form.add_button(label, on_click=lambda sender, m=mid: self._show_map_edit(sender, m))
         form.add_button(self._t("BTN_CREATE_MAP"), on_click=lambda sender: self._show_create_map_form(sender))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_root_menu(sender))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_create_map_form(self, player: Player) -> None:
         if not self._is_op(player):
@@ -3966,7 +4121,7 @@ class ARCShooterGamePlugin(Plugin):
             controls=[TextInput(label=self._t("CREATE_MAP_NAME"), placeholder="仓库")],
             on_submit=on_submit,
         )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_map_edit(self, player: Player, map_id: str) -> None:
         if not self._is_op(player):
@@ -3998,7 +4153,7 @@ class ARCShooterGamePlugin(Plugin):
         form.add_button(self._t("BTN_RENAME_MAP"), on_click=lambda sender, m=map_id: self._show_rename_map_form(sender, m))
         form.add_button(self._t("BTN_DELETE_MAP"), on_click=lambda sender, m=map_id: self._show_delete_map_confirm(sender, m))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_config_maps(sender))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_rename_map_form(self, player: Player, map_id: str) -> None:
         if not self._is_op(player):
@@ -4032,7 +4187,7 @@ class ARCShooterGamePlugin(Plugin):
             ],
             on_submit=on_submit,
         )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_delete_map_confirm(self, player: Player, map_id: str) -> None:
         if not self._is_op(player):
@@ -4053,7 +4208,7 @@ class ARCShooterGamePlugin(Plugin):
             on_click=lambda sender, m=map_id, n=display_name: self._delete_map(sender, m, n),
         )
         form.add_button(self._t("BTN_CANCEL"), on_click=lambda sender, m=map_id: self._show_map_edit(sender, m))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _delete_map(self, player: Player, map_id: str, display_name: str) -> None:
         if not self._is_op(player):
@@ -4144,7 +4299,7 @@ class ARCShooterGamePlugin(Plugin):
             controls=[Dropdown(label=self._t("ADD_MODE_DROPDOWN"), options=options, default_index=0)],
             on_submit=on_submit,
         )
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_mode_edit(self, player: Player, map_id: str, mode: str) -> None:
         assert self.config_store is not None
@@ -4183,7 +4338,7 @@ class ARCShooterGamePlugin(Plugin):
             on_click=lambda sender, m=map_id, md=mode: self._show_spawn_edit(sender, m, md, TEAM_B),
         )
         form.add_button(self._t("BACK"), on_click=lambda sender, m=map_id: self._show_map_edit(sender, m))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _show_spawn_edit(self, player: Player, map_id: str, mode: str, team_id: str) -> None:
         assert self.config_store is not None
@@ -4219,7 +4374,7 @@ class ARCShooterGamePlugin(Plugin):
                 on_click=lambda sender, m=map_id, md=mode, t=team_id, i=idx: self._remove_spawn(sender, m, md, t, i),
             )
         form.add_button(self._t("BACK"), on_click=lambda sender, m=map_id, md=mode: self._show_mode_edit(sender, m, md))
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _add_spawn(self, player: Player, map_id: str, mode: str, team_id: str) -> None:
         assert self.config_store is not None
@@ -4659,4 +4814,4 @@ class ARCShooterGamePlugin(Plugin):
             ],
             on_submit=on_submit,
         )
-        player.send_form(form)
+        self._send_form(player, form)
