@@ -585,7 +585,7 @@ class ARCShooterGamePlugin(Plugin):
         self._show_root_menu(sender)
         return True
 
-    def _handle_quick_join(self, player: Player) -> None:
+    def _handle_quick_join(self, player: Player, *, quiet: bool = False) -> None:
         """快速开始：立刻加入一个能进的房间；没有就创建一间。
 
         选择顺序：
@@ -616,7 +616,8 @@ class ARCShooterGamePlugin(Plugin):
                 f"§a快速加入房间 {pick.display_name}（{self._lobby_map_label(pick)} · "
                 f"{self._lobby_mode_label(pick)}）")
             self._join_lobby(player, pick.lobby_id)
-            self._quick_autostart(pick)
+            if not quiet:
+                self._quick_autostart(pick)
             return
         if not self._playable_maps():
             player.send_message(self._t("CREATE_LOBBY_NO_MAPS"))
@@ -625,7 +626,9 @@ class ARCShooterGamePlugin(Plugin):
         self._create_lobby(player)
         lobby = self._lobby_of(player.name)
         if lobby is not None:
-            self._quick_autostart(lobby)
+            if not quiet:
+                self._quick_autostart(lobby)
+            self._maybe_fill_with_bots(lobby, trigger=player)
 
     def _quick_autostart(self, lobby: Lobby) -> None:
         """快速开始路径的自动开局。
@@ -693,7 +696,33 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as exc:
             return {"ok": False, "text": f"api_leave: {exc}"}
 
-    def api_quick_join(self, player: Any) -> Dict[str, Any]:
+    def _maybe_fill_with_bots(self, lobby: Lobby, trigger: Player) -> None:
+        """真人在等待中的大厅里时，请 arc_fake_player 派 AI 来凑人数。
+
+        只在触发者是**真人**（xuid 非空）且房间还在等待/倒计时时调用；
+        假人插件按自己的配置（shooter_fill）决定派不派、派几个。
+        派来的 AI 走 quiet 加入——**不抢房主的开局权**（想立刻开打
+        就按「快速开始」按钮）。
+        """
+        try:
+            if lobby.state not in (STATE_LOBBY, STATE_COUNTDOWN):
+                return
+            if not str(getattr(trigger, "xuid", "") or "").strip():
+                return          # 假人自己进房不触发（防循环补人）
+            pm = getattr(self.server, "plugin_manager", None)
+            afp = pm.get_plugin("arc_fake_player") if pm else None
+            fill = getattr(afp, "api_fill_shooter", None)
+            if not callable(fill):
+                return
+            max_players = lobby.max_per_team * 2
+            free = max_players - lobby.player_count()
+            if free <= 0:
+                return
+            fill(free)
+        except Exception as exc:
+            self._safe_log("debug", f"fill_with_bots: {exc}")
+
+    def api_quick_join(self, player: Any, quiet: bool = False) -> Dict[str, Any]:
         """给其他插件（如 AI 假人插件）调用的快速开始接口。
 
         在**主线程**调用，传在线 Player 对象。返回 {"ok": bool, "text": str}。
@@ -704,7 +733,7 @@ class ARCShooterGamePlugin(Plugin):
                 return {"ok": False, "text": "player 无效"}
             if self._get_player(name) is None:
                 return {"ok": False, "text": f"{name} 不在线"}
-            self._handle_quick_join(player)
+            self._handle_quick_join(player, quiet=quiet)
             lobby = self._lobby_of(name)
             if lobby is None:
                 return {"ok": False, "text": "加入失败（没有可用地图或房间已满）"}
@@ -1123,6 +1152,9 @@ class ARCShooterGamePlugin(Plugin):
                 stay=25,
                 fade_out=5,
             )
+        # 真人进入等待中的房间 → 请假人插件派 AI 凑人数
+        if lobby.state in (STATE_LOBBY, STATE_COUNTDOWN):
+            self._maybe_fill_with_bots(lobby, trigger=player)
 
     def _leave_lobby(self, player: Player, lobby: Lobby, *, schedule_menu: bool = True) -> None:
         leaver_name = player.name
@@ -3053,6 +3085,10 @@ class ARCShooterGamePlugin(Plugin):
             return
         try:
             form = ActionForm(title=self._t("MENU_TITLE"), content=self._t("MENU_CONTENT"))
+            form.add_button(
+                "⚡ 快速开始（有房就进，没房随机开）",
+                on_click=lambda sender: self._handle_quick_join(sender),
+            )
             form.add_button(self._t("BTN_LOBBY_LIST"), on_click=lambda sender: self._show_lobby_list(sender))
             form.add_button(self._t("BTN_SHOOTING_RANGE"), on_click=lambda sender: self._enter_shooting_range(sender))
             form.add_button(self._t("BTN_ARMORY"), on_click=lambda sender: self._show_armory(sender))
