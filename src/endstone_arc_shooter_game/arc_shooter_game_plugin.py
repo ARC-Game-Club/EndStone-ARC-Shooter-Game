@@ -225,12 +225,15 @@ class ARCShooterGamePlugin(Plugin):
         },
         "addspawn": {
             "description": "把脚下位置加为指定模式的出生点（自动识别所在地图）",
-            "usages": ["/addspawn <模式> [队伍]"],
+            # ⚠ 占位符必须是纯 ASCII：BDS 解析命令 usage 时遇到非 ASCII
+            #   会直接报 "Syntax Error: expect 'parameter name' or 'enum
+            #   value'"，整条命令注册失败（中文说明放 description 里）。
+            "usages": ["/addspawn <mode> [team]"],
             "permissions": ["arc_shooter_game.command.mapedit"],
         },
         "rmspawn": {
             "description": "删除脚下附近最近的指定模式出生点（自动识别所在地图）",
-            "usages": ["/rmspawn <模式> [队伍]"],
+            "usages": ["/rmspawn <mode> [team]"],
             "permissions": ["arc_shooter_game.command.mapedit"],
         },
         "setrange": {
