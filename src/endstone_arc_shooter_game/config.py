@@ -105,6 +105,12 @@ DEFAULT_SETTINGS = {
     # OP 改 settings.yml 即可调整每队默认护甲，无需改代码。
     "TEAM_A_DEFAULT_ARMOR": '{"helmet":"arc:6b47_helmet_red","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_red"}',
     "TEAM_B_DEFAULT_ARMOR": '{"helmet":"arc:6b47_helmet_blue","chestplate":"arc:6b45_vest","leggings":"arc:emr_suit_blue"}',
+    # === 枪战战报 → QQ 群（经群服互通插件 arc_qq_sync_astrbot） ===
+    # 开赛和终局各发一条战报到 QQ 群。设 "0" 关闭对应项。
+    # 群服互通插件不在 / 没连中枢时自动静默跳过，不用管。
+    "QQ_REPORT_ENABLED": "1",
+    "QQ_REPORT_START": "1",
+    "QQ_REPORT_END": "1",
 }
 
 DEFAULT_MAPS = {

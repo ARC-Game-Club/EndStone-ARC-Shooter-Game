@@ -50,3 +50,6 @@ plugins/ARCShooterGame/maps.json
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 本地构建日志
+build.log

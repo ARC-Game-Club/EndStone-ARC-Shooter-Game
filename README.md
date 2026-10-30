@@ -119,6 +119,9 @@ XP_PER_LEVEL=100
 MAX_LEVEL=100
 XP_WIN_BONUS_PERCENT=20
 XP_MVP_PER_TEAMMATE=10
+QQ_REPORT_ENABLED=1
+QQ_REPORT_START=1
+QQ_REPORT_END=1
 ```
 
 | 键 | 说明 |
@@ -127,6 +130,12 @@ XP_MVP_PER_TEAMMATE=10
 | `XP_*` / `MAX_LEVEL` | 生涯经验与等级；MVP 额外经验为 `队伍人数 × XP_MVP_PER_TEAMMATE` |
 | `BUY_TIME_SECONDS` | 开局购买/配置窗时长（无敌 + 弧光币换装） |
 | `TEAM_A_DEFAULT_ARMOR` / `TEAM_B_DEFAULT_ARMOR` | 按队色开局自动发放的默认护甲（JSON 嵌套：头盔/胸甲/护腿） |
+| `QQ_REPORT_ENABLED` | 战报总开关：`1` 开、`0` 关 |
+| `QQ_REPORT_START` | 开赛时往 QQ 群发一条开局播报 |
+| `QQ_REPORT_END` | 终局往 QQ 群发一条战报（比分 + 每人击杀/死亡/助攻） |
+
+> 战报经**群服互通插件**（`arc_qq_sync_astrbot`）发进 QQ 群，消息前面自动带
+> 服务器名。该插件不在、或没连上消息中枢时，战报静默跳过（不影响对局）。
 
 ## 武器 `weapons.json`
 
@@ -157,6 +166,13 @@ python -m unittest tests.test_logic
 ```
 
 ## 更新日志
+
+### v0.4.29
+
+- **战报转发到 QQ 群**：开赛和终局各发一条战报到 QQ 群——开局播报带地图/模式/两边名单/目标分，终局战报带终局比分、胜方和每人击杀/死亡/助攻（含 TK）。经群服互通插件 `arc_qq_sync_astrbot` 的 `custom` 事件发出，消息前自动带服务器名
+- 开关在 `settings.yml`：`QQ_REPORT_ENABLED` / `QQ_REPORT_START` / `QQ_REPORT_END`，设 `0` 关闭
+- 终局战报在 `_end_match` **最前面**取数——那个函数末尾会把大厅从 `lobbies` 里摘掉，晚一步就读不到终局比分了
+- 群服互通插件不在、没连中枢、调用抛异常——一律静默跳过，不影响对局
 
 ### v0.4.18
 

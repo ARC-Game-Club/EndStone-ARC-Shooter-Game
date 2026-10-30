@@ -71,6 +71,7 @@ from endstone_arc_shooter_game.inventory import (
     snapshot_player,
 )
 from endstone_arc_shooter_game.language import LanguageManager
+from endstone_arc_shooter_game import qq_report
 from endstone_arc_shooter_game.loadout import (
     ACQUIRE_ARMORY,
     REASON_ALREADY_OWNED,
@@ -1385,6 +1386,8 @@ class ARCShooterGamePlugin(Plugin):
             )
         match_min = lobby.match_time_minutes
         self._broadcast(lobby, self._t("GAME_STARTED").format(match_min, lobby.target_score))
+        # 开战了 → 群里发一条开局播报（比分 0:0、两边名单）。
+        self._qq_report_start(lobby)
         battle_sub = self._t("TITLE_BATTLE_SUB").format(match_min, lobby.target_score)
         if remind_team:
             for ps in lobby.online_players():
@@ -2083,6 +2086,9 @@ class ARCShooterGamePlugin(Plugin):
         )
 
     def _end_match(self, lobby: Lobby, winner: Optional[str], *, timed_out: bool = False) -> None:
+        # 终局战报要在最前面发：这函数最后会把大厅从 self.lobbies 里摘掉，
+        # 晚了就读不到终局比分了。
+        self._qq_report_end(lobby, winner, timed_out=timed_out)
         rewards, mvp_names = self._distribute_match_rewards(lobby, winner)
         result_content = self._match_result_content(
             lobby, winner, timed_out=timed_out, rewards=rewards, mvp_names=mvp_names
@@ -2619,6 +2625,109 @@ class ARCShooterGamePlugin(Plugin):
     def _broadcast_server(self, message: str) -> None:
         for player in self.server.online_players:
             player.send_message(message)
+
+    # ------------------------------------------------------------------
+    # 战报 → QQ 群
+    # ------------------------------------------------------------------
+    #
+    # 发消息的接口只有群服互通插件（arc_qq_sync_astrbot）有，枪战插件
+    # 自己不发消息，但开赛/收尾只有它知道——所以在这儿叫群服互通插件
+    # 代发。任何一步失败都静默跳过：战报是锦上添花，不能反过来把对局
+    # 搞崩。
+
+    #: settings.yml 里的开关名。
+    QQ_REPORT_ENABLED_KEY = "QQ_REPORT_ENABLED"
+    QQ_REPORT_START_KEY = "QQ_REPORT_START"
+    QQ_REPORT_END_KEY = "QQ_REPORT_END"
+
+    def _qq_report_flag(self, key: str) -> bool:
+        """读 settings.yml 里的开关（1/0、true/false 都认）。"""
+        store = getattr(self, "config_store", None)
+        settings = getattr(store, "settings", None)
+        if settings is None:
+            return False
+        try:
+            raw = settings.GetSetting(key)
+        except Exception:
+            return False
+        if raw is None:
+            return False
+        return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+    def _qq_send_report(self, text: str) -> bool:
+        """把一段战报文本发进 QQ 群（经群服互通插件）。
+
+        事件类型用 ``custom``——中枢按"自定义播报"原样转发，前面自动
+        带服务器名（``[弧光枪械战争服务器]``）。force_text=True 让多行
+        战报按我们排好的样子原样出去，不让中枢再排一遍。
+        """
+        if not text:
+            return False
+        try:
+            pm = getattr(self.server, "plugin_manager", None)
+            plug = pm.get_plugin("arc_qq_sync_astrbot") if pm else None
+        except Exception:
+            plug = None
+        fn = getattr(plug, "api_send_event", None)
+        if not callable(fn):
+            return False
+        try:
+            try:
+                fn("custom", "弧光枪战", "弧光枪战", message=text,
+                   force_text=True)
+            except TypeError:
+                # 老版本没有 force_text / message 关键字
+                fn("custom", "弧光枪战", "弧光枪战", text)
+        except Exception as exc:
+            self._safe_log("warning", "[ARCShooterGame] 战报转发失败: {0}".format(exc))
+            return False
+        return True
+
+    def _qq_report_start(self, lobby: Lobby) -> None:
+        """开赛瞬间发一条开局播报。"""
+        if not self._qq_report_flag(self.QQ_REPORT_ENABLED_KEY):
+            return
+        if not self._qq_report_flag(self.QQ_REPORT_START_KEY):
+            return
+        try:
+            text = qq_report.build_start_report(
+                lobby,
+                map_label=self._lobby_map_label(lobby),
+                mode_label=self._lobby_mode_label(lobby),
+            )
+        except Exception as exc:
+            self._safe_log("warning",
+                           "[ARCShooterGame] 开局战报生成失败: {0}".format(exc))
+            return
+        if self._qq_send_report(text):
+            self._safe_log("info", "[ARCShooterGame] 开局战报已转发到 QQ 群")
+
+    def _qq_report_end(self, lobby: Lobby, winner: Optional[str], *,
+                       timed_out: bool = False) -> None:
+        """对局结束瞬间发一条终局战报。
+
+        必须在 ``_end_match`` **最前面**调：那边会把大厅摘掉（lobbies.pop），
+        晚了就读不到终局比分了。
+        """
+        if not self._qq_report_flag(self.QQ_REPORT_ENABLED_KEY):
+            return
+        if not self._qq_report_flag(self.QQ_REPORT_END_KEY):
+            return
+        # 没胜负也没超时 = 人走光 / 插件停服导致的大厅解散，不是一局。
+        if not winner and not timed_out:
+            return
+        try:
+            text = qq_report.build_end_report(
+                lobby, winner,
+                timed_out=timed_out,
+                map_label=self._lobby_map_label(lobby),
+            )
+        except Exception as exc:
+            self._safe_log("warning",
+                           "[ARCShooterGame] 终局战报生成失败: {0}".format(exc))
+            return
+        if self._qq_send_report(text):
+            self._safe_log("info", "[ARCShooterGame] 终局战报已转发到 QQ 群")
 
     def _notify_lobby_members_joined(
         self, lobby: Lobby, joiner_name: str, count: int, max_players: int
