@@ -629,10 +629,8 @@ class ARCShooterGamePlugin(Plugin):
         player.send_message("§a没有可加入的房间，已为你创建新房（随机地图/模式）")
         self._create_lobby(player)
         lobby = self._lobby_of(player.name)
-        if lobby is not None:
-            if not quiet:
-                self._quick_autostart(lobby)
-            self._maybe_fill_with_bots(lobby, trigger=player)
+        if lobby is not None and not quiet:
+            self._quick_autostart(lobby)
 
     def _quick_autostart(self, lobby: Lobby) -> None:
         """快速开始路径的自动开局。
@@ -684,9 +682,85 @@ class ARCShooterGamePlugin(Plugin):
                 "team": my_team,
                 "enemies": enemies,
                 "match_seconds": int(lobby.match_time_seconds or 300),
+                "lobby_id": lobby.lobby_id,
             }
         except Exception as exc:
             return {"ok": False, "text": f"api_lobby_info: {exc}"}
+
+    def api_lobby_status(self) -> Dict[str, Any]:
+        """枪战房间现状（给假人插件的主循环判断用）。
+
+        返回：
+            total           现在有几间房
+            open            几间还能进（没满）
+            running         几间正在打（buying/playing）
+            running_lobby_id 其中一间进行中对局的 id（优先给第一个）
+        """
+        try:
+            total = len(self.lobbies)
+            open_n = 0
+            running = 0
+            running_id = ""
+            for lobby in self.lobbies.values():
+                ok, _reason = lobby.can_join()
+                if ok:
+                    open_n += 1
+                if lobby.state in (STATE_BUYING, STATE_PLAYING):
+                    running += 1
+                    if not running_id:
+                        running_id = lobby.lobby_id
+            return {"ok": True, "total": total, "open": open_n,
+                    "running": running, "running_lobby_id": running_id}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_lobby_status: {exc}"}
+
+    def api_autostart(self, lobby_id: str) -> Dict[str, Any]:
+        """全假人的房间人齐了就自动开打。
+
+        为什么需要：假人不会去点"开始"按钮。没有这条，
+        假人自己建的房间会一直挂在等待状态，直到 LOBBY_TIMEOUT
+        （默认 15 分钟）被回收——服上看过去就是"房间建了没人开"。
+
+        房里有**真人**就不动：开局权归房主（他可能还想改地图/配装）。
+        """
+        try:
+            lobby = self.lobbies.get(str(lobby_id or ""))
+            if lobby is None:
+                return {"ok": False, "text": "房间不在了"}
+            if lobby.state != STATE_LOBBY:
+                return {"ok": False, "text": "不是等待状态"}
+            if not lobby.teams_ready_to_start():
+                return {"ok": False, "text": "人还没齐"}
+            for ps in lobby.online_players():
+                if not self._is_bot_player(ps.name):
+                    return {"ok": False, "text": "房里有真人，开局权归房主"}
+            starter = self._get_player(lobby.admin or "")
+            if starter is None:
+                for ps in lobby.online_players():
+                    member = self._get_player(ps.name)
+                    if member is not None:
+                        starter = member
+                        break
+            if starter is None:
+                return {"ok": False, "text": "找不到房主"}
+            self._start_match(starter, lobby)
+            self._safe_log("info",
+                           f"[ARCShooterGame] 全 AI 房间 {lobby.lobby_id} 人齐自动开局")
+            return {"ok": True, "text": "已开局"}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_autostart: {exc}"}
+
+    def _is_bot_player(self, name: str) -> bool:
+        """这个名字是不是假人。
+
+        判据是 **xuid 为空**——SimulatedPlayer 没有 Xbox Live 客户端，
+        xuid 必然是空的（实测日志里明明白白是 `xuid: ,`）。
+        真人的 xuid 非空（离线登录的真人例外，但那本来也分不出）。
+        """
+        player = self._get_player(str(name or ""))
+        if player is None:
+            return False
+        return not str(getattr(player, "xuid", "") or "").strip()
 
     def api_leave(self, player: Any) -> Dict[str, Any]:
         """给其他插件调用的离开接口（房间/对局都适用）。主线程调用。"""
@@ -722,14 +796,26 @@ class ARCShooterGamePlugin(Plugin):
             free = max_players - lobby.player_count()
             if free <= 0:
                 return
-            fill(free)
+            # 把目标房间告诉假人插件——它们要进的是**这一间**，
+            # 不是"随便哪间能进的"。否则多个房间并存时，补位的人
+            # 会按 quick 的优先级散进各个等待室，新房间反而没人。
+            try:
+                fill(free, lobby_id=lobby.lobby_id)
+            except TypeError:
+                fill(free)          # 老版本假人插件只认一个参数
         except Exception as exc:
             self._safe_log("debug", f"fill_with_bots: {exc}")
 
-    def api_quick_join(self, player: Any, quiet: bool = False) -> Dict[str, Any]:
+    def api_quick_join(self, player: Any, quiet: bool = False,
+                       lobby_id: str = "") -> Dict[str, Any]:
         """给其他插件（如 AI 假人插件）调用的快速开始接口。
 
-        在**主线程**调用，传在线 Player 对象。返回 {"ok": bool, "text": str}。
+        在**主线程**调用，传在线 Player 对象。返回 {"ok": bool, "text": str,
+        "lobby_id": str, "created": bool}。
+
+        ``lobby_id`` 不为空时**只**进这一个房间：塞不下就失败，
+        绝不退而求其次去建新房——"全部假人补位到某个房间"要的是
+        "进不去就进不去"，而不是每个塞不下的假人各自开一间房。
         """
         try:
             name = str(getattr(player, "name", "") or "")
@@ -737,6 +823,25 @@ class ARCShooterGamePlugin(Plugin):
                 return {"ok": False, "text": "player 无效"}
             if self._get_player(name) is None:
                 return {"ok": False, "text": f"{name} 不在线"}
+            if lobby_id:
+                lobby = self.lobbies.get(str(lobby_id))
+                if lobby is None:
+                    return {"ok": False, "text": "指定的房间不在了"}
+                ok, _reason = lobby.can_join()
+                if not ok:
+                    return {"ok": False, "text": "指定房间已满"}
+                player.send_message(
+                    f"§a快速加入房间 {lobby.display_name}"
+                    f"（{self._lobby_map_label(lobby)} · "
+                    f"{self._lobby_mode_label(lobby)}）")
+                self._join_lobby(player, lobby.lobby_id)
+                if not quiet:
+                    self._quick_autostart(lobby)
+                return {"ok": True,
+                        "text": f"已进入房间 {lobby.display_name}",
+                        "lobby_id": lobby.lobby_id,
+                        "created": False}
+            before = len(self.lobbies)
             self._handle_quick_join(player, quiet=quiet)
             lobby = self._lobby_of(name)
             if lobby is None:
@@ -744,7 +849,9 @@ class ARCShooterGamePlugin(Plugin):
             return {"ok": True,
                     "text": f"已进入房间 {lobby.display_name} "
                             f"({self._lobby_map_label(lobby)} · "
-                            f"{self._lobby_mode_label(lobby)})"}
+                            f"{self._lobby_mode_label(lobby)})",
+                    "lobby_id": lobby.lobby_id,
+                    "created": len(self.lobbies) > before}
         except Exception as exc:
             return {"ok": False, "text": f"api_quick_join: {exc}"}
 
@@ -1103,6 +1210,10 @@ class ARCShooterGamePlugin(Plugin):
             )
         )
         self._refresh_lobby_menus(lobby)
+        # 建房也要补位：原先只在"真人加入已有房间"时补，而建房走的是
+        # `Lobby.join()` 不是 `_join_lobby()`，钩子漏掉了——结果就是
+        # "真人建了房，房间一直空着没人来"。
+        self._maybe_fill_with_bots(lobby, trigger=player)
 
     def _join_lobby(self, player: Player, lobby_id: str) -> None:
         if self._lobby_of(player.name) is not None:

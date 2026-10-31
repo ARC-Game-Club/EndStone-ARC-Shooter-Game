@@ -53,3 +53,7 @@ htmlcov/
 
 # 本地构建日志
 build.log
+
+# 备份文件（别进仓库，也别进 wheel）
+*.bak-*
+*.bak
