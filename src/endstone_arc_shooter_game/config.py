@@ -710,6 +710,39 @@ def normalize_team_arg(raw: Any) -> Optional[str]:
     return TEAM_ARG_ALIASES.get(key)
 
 
+# `/gs range` 的动作别名。进靶场统一归到 "enter"（已在靶场内时=_回到入口）。
+RANGE_ACTION_ALIASES = {
+    "enter": "enter",
+    "in": "enter",
+    "go": "enter",
+    "tp": "enter",
+    "join": "enter",
+    "entry": "enter",
+    "back": "enter",
+    "exit": "exit",
+    "leave": "exit",
+    "out": "exit",
+    "quit": "exit",
+}
+
+
+def parse_range_command_args(args: Any) -> Tuple[str, str]:
+    """解析 `/gs range [exit] [玩家名]`，返回 (action, target_name)。
+
+    action ∈ {"enter", "exit"}；target_name 为空表示"操作执行者自己"。
+    第一个词命中动作别名表就当动作，否则当玩家名（`/gs range Steve`）。
+    """
+    tokens = [str(a).strip() for a in (args or []) if str(a).strip()]
+    action = "enter"
+    if tokens:
+        mapped = RANGE_ACTION_ALIASES.get(tokens[0].lower())
+        if mapped is not None:
+            action = mapped
+            tokens = tokens[1:]
+    name = tokens[0] if tokens else ""
+    return action, name
+
+
 def find_maps_at_point(
     maps: Dict[str, Dict[str, Any]],
     x: float,

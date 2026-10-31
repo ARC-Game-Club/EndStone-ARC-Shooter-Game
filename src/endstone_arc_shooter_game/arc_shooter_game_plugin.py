@@ -43,6 +43,7 @@ from endstone_arc_shooter_game.config import (
     has_region,
     nearest_spawn_index,
     normalize_team_arg,
+    parse_range_command_args,
     map_incomplete_reasons,
     mode_incomplete_reasons,
     mode_playable,
@@ -221,6 +222,8 @@ class ARCShooterGamePlugin(Plugin):
                 "/gs quick",
                 "/gs leave",
                 "/gs reload",
+                "/gs range",
+                "/gs range exit",
             ],
             "permissions": ["arc_shooter_game.command.gs"],
         },
@@ -292,6 +295,23 @@ class ARCShooterGamePlugin(Plugin):
         else:
             print(f"[{level.upper()}] {message}")
 
+    def _close_open_form(self, player: Optional[Player]) -> None:
+        """关掉玩家当前已打开的表单。
+
+        BDS 同一时刻只能给一个玩家挂一个表单：不先关掉，新表单发不出去，
+        玩家那边就是"弹窗出不来"。所有弹新表单的地方都先走这里
+        （与弧光核心 /arc 的处理一致）。
+        """
+        if player is None:
+            return
+        try:
+            player.close_form()
+        except Exception as e:
+            self._safe_log(
+                "warning",
+                f"[ARCShooterGame] close_form failed for {getattr(player, 'name', '?')}: {e}",
+            )
+
     def _send_form(self, player: Player, form: Any) -> None:
         """安全发表单。
 
@@ -299,10 +319,13 @@ class ARCShooterGamePlugin(Plugin):
         可能抛异常也可能静默丢弃。统一从这里走：假人直接跳过、异常兜住。
         否则 AI 走 `/gs quick` 这类无 UI 路径时，会在"加入对局"半路
         被一张菜单表单打断。
+
+        发之前先关掉当前表单，保证新表单立刻送达客户端。
         """
         try:
             if not str(getattr(player, "xuid", "") or "").strip():
                 return          # xuid 为空 = 模拟玩家：无客户端
+            self._close_open_form(player)
             player.send_form(form)
         except Exception:
             pass
@@ -575,6 +598,8 @@ class ARCShooterGamePlugin(Plugin):
                 sender.send_message(self._t("CMD_PLAYER_ONLY"))
                 return True
             sender = resolved
+        # 命令要弹新表单前，先关掉玩家当前打开的表单，否则新表单送不到客户端
+        self._close_open_form(sender)
         if sub == "leave":
             self._handle_leave(sender, confirm_match=True)
             return True
@@ -583,11 +608,59 @@ class ARCShooterGamePlugin(Plugin):
             # （随机地图+模式）。纯命令路径，不弹任何表单。
             self._handle_quick_join(sender)
             return True
-        if sub and sub not in ("leave", "quick"):
+        if sub in ("range", "tp"):
+            # 靶场快捷指令：/gs range [exit] [玩家名]
+            # 只认 sender 不认"谁敲的命令"——`execute as @s run gs range` 时
+            # sender 指向被 as 的那个玩家，所以能替别人调用。
+            self._handle_range_command(sender, args[1:])
+            return True
+        if sub and sub not in ("leave", "quick", "range", "tp"):
             sender.send_message(self._t("CMD_UNKNOWN_SUB").format(sub))
             return True
         self._show_root_menu(sender)
         return True
+
+    def _handle_range_command(self, sender: CommandSender, args: list[str]) -> None:
+        """`/gs range`：前往靶场的快捷指令。
+
+        用法：
+          /gs range                 执行者自己进靶场（已在靶场则回到入口）
+          /gs range exit            执行者退出靶场（恢复进入前的背包与位置）
+          /gs range <玩家名>         指定玩家进靶场（需 OP）
+          /gs range exit <玩家名>    指定玩家退出靶场（需 OP）
+
+        刻意只认 sender、不认"谁敲的命令"：经 `execute as @s run gs range`
+        转发时 sender 指向被 as 的那个玩家，所以命令方块/脚本能替别人调用。
+        """
+        action, target_name = parse_range_command_args(args)
+        if target_name:
+            # 替别人操作要走 OP；sender 已是玩家（上面解析过），按玩家判 OP
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return
+            target = self._get_player(target_name)
+            if target is None:
+                sender.send_message(self._t("RANGE_CMD_TARGET_NOT_FOUND").format(target_name))
+                return
+        else:
+            target = self._resolve_player_for_command_sender(sender)
+            if target is None:
+                sender.send_message(self._t("CMD_PLAYER_ONLY"))
+                return
+        # 进靶场前先关掉当前表单：进靶场后要靠按钮唤出靶场菜单/军械库，
+        # 旧表单不关的话新弹窗出不来
+        self._close_open_form(target)
+        if action == "exit":
+            if not self._in_range(target):
+                target.send_message(self._t("RANGE_NOT_IN"))
+                return
+            self._exit_range(target)
+            return
+        sender_name = str(getattr(sender, "name", "") or "").strip()
+        target_name_now = self._player_name(target)
+        if sender_name and target_name_now and sender_name.lower() != target_name_now.lower():
+            target.send_message(self._t("RANGE_TP_BY_OTHER").format(sender_name))
+        self._enter_shooting_range(target)
 
     def _handle_quick_join(self, player: Player, *, quiet: bool = False) -> None:
         """快速开始：立刻加入一个能进的房间；没有就创建一间。
@@ -4888,6 +4961,9 @@ class ARCShooterGamePlugin(Plugin):
         if cfg is None:
             player.send_message(self._t("RANGE_NOT_CONFIGURED"))
             return
+        # 进靶场后要靠按钮唤出靶场菜单/军械库，先关掉当前表单，
+        # 否则新弹窗送不到客户端（"弹窗出不来"）
+        self._close_open_form(player)
         if self._lobby_of(player.name) is not None:
             player.send_message(self._t("JOIN_FAIL_IN_GAME"))
             return
@@ -4938,7 +5014,7 @@ class ARCShooterGamePlugin(Plugin):
         form.add_button(self._t("RANGE_BTN_ENTRY"), on_click=lambda sender: self._range_tp_to_entry(sender))
         form.add_button(self._t("RANGE_BTN_EXIT"), on_click=lambda sender: self._exit_range(sender))
         form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
-        player.send_form(form)
+        self._send_form(player, form)
 
     def _range_tp_to_entry(self, player: Player) -> None:
         cfg = self._range_cfg()

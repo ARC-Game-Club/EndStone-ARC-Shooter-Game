@@ -18,6 +18,7 @@ from endstone_arc_shooter_game.config import (
     normalize_team_arg,
     normalize_weapon,
     normalize_range_cfg,
+    parse_range_command_args,
     playable_modes,
     point_in_region,
     slot_layout,
@@ -1099,6 +1100,102 @@ class RangeCfgTests(unittest.TestCase):
                 {"region": {"pos1": pos, "pos2": None}, "entry": pos}
             )
         )
+
+
+class RangeCommandArgsTests(unittest.TestCase):
+    """parse_range_command_args：`/gs range [exit] [玩家名]` 解析。"""
+
+    def test_no_args_defaults_to_enter_self(self):
+        self.assertEqual(parse_range_command_args([]), ("enter", ""))
+        self.assertEqual(parse_range_command_args(None), ("enter", ""))
+        self.assertEqual(parse_range_command_args([""]), ("enter", ""))
+
+    def test_exit_aliases(self):
+        for word in ("exit", "leave", "out", "quit", "EXIT"):
+            self.assertEqual(parse_range_command_args([word]), ("exit", ""), word)
+
+    def test_enter_aliases(self):
+        for word in ("enter", "in", "go", "tp", "join", "entry", "back"):
+            self.assertEqual(parse_range_command_args([word]), ("enter", ""), word)
+
+    def test_player_name_without_action(self):
+        self.assertEqual(parse_range_command_args(["Steve"]), ("enter", "Steve"))
+        self.assertEqual(parse_range_command_args(["Steve", "x"]), ("enter", "Steve"))
+
+    def test_action_then_player_name(self):
+        self.assertEqual(parse_range_command_args(["exit", "Steve"]), ("exit", "Steve"))
+        self.assertEqual(parse_range_command_args(["leave", "Steve"]), ("exit", "Steve"))
+
+    def test_player_name_named_like_action_word(self):
+        # 已知动作词优先当动作；拼写相近但未登记的当玩家名
+        self.assertEqual(parse_range_command_args(["entries"]), ("enter", "entries"))
+
+
+class RangeCommandDispatchTests(unittest.TestCase):
+    """on_command 分发：`/gs range`（及 `/gs tp`）要走靶场快捷指令。
+
+    插件模块依赖 endstone，离线测试用仓库 scripts/ 里的 stub 顶替。
+    """
+
+    def setUp(self):
+        import sys
+
+        stub_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(stub_dir) not in sys.path:
+            sys.path.insert(0, str(stub_dir))
+        import _endstone_stub_shooter as stub
+
+        stub.add_src_to_path()
+        from endstone_arc_shooter_game.arc_shooter_game_plugin import ARCShooterGamePlugin
+
+        self.plugin_class = ARCShooterGamePlugin
+        self.fake_player = type(
+            "FakePlayer", (), {"name": "Steve", "xuid": "1", "is_op": True}
+        )()
+        self.calls = []
+        plugin = ARCShooterGamePlugin()
+        # execute 转发时 sender 可能不是 Player 实例，这里直接给解析结果
+        plugin._resolve_player_for_command_sender = lambda sender: self.fake_player
+        plugin._close_open_form = lambda player: None
+        plugin._handle_range_command = lambda sender, args: self.calls.append(
+            (sender, list(args))
+        )
+        # 根菜单要摸 server，离线测试不跑它
+        plugin._show_root_menu = lambda player: None
+        self.plugin = plugin
+
+    @staticmethod
+    def _command(name):
+        return type("FakeCommand", (), {"name": name})()
+
+    def test_gs_range_dispatches(self):
+        self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["range"]))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1], [])
+
+    def test_gs_tp_alias_dispatches(self):
+        self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["tp"]))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1], [])
+
+    def test_gs_range_forwards_rest_args(self):
+        self.plugin.on_command(
+            self.fake_player, self._command("gs"), ["range", "exit", "Steve"]
+        )
+        self.assertEqual(self.calls[0][1], ["exit", "Steve"])
+
+    def test_gs_without_sub_does_not_dispatch_range(self):
+        self.plugin.on_command(self.fake_player, self._command("gs"), [])
+        self.assertEqual(self.calls, [])
+
+    def test_usage_list_mentions_range(self):
+        usages = self.plugin_class.commands["gs"]["usages"]
+        self.assertIn("/gs range", usages)
+        self.assertIn("/gs range exit", usages)
+
+    def test_range_permission_is_default_true(self):
+        perm = self.plugin_class.permissions["arc_shooter_game.command.gs"]
+        self.assertIs(perm["default"], True)
 
 
 if __name__ == "__main__":
