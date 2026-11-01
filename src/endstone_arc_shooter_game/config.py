@@ -743,6 +743,12 @@ def parse_range_command_args(args: Any) -> Tuple[str, str]:
     return action, name
 
 
+def parse_target_player_arg(args: Any) -> str:
+    """解析 `/gs xxx [玩家名]` 里的可选玩家名，返回 "" 表示"操作执行者自己"。"""
+    tokens = [str(a).strip() for a in (args or []) if str(a).strip()]
+    return tokens[0] if tokens else ""
+
+
 def find_maps_at_point(
     maps: Dict[str, Dict[str, Any]],
     x: float,

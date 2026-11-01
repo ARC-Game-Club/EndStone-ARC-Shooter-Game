@@ -1,9 +1,20 @@
 # -*- coding: utf-8 -*-
 import json
 import math
+import sys
 import unittest
 from pathlib import Path
 
+# 插件模块依赖 endstone，离线测试用仓库 scripts/ 里的 stub 顶替。
+# 必须先于 endstone_arc_shooter_game.* 的导入执行（stub 会注册 sys.modules["endstone"]）。
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import _endstone_stub_shooter as _endstone_stub
+
+_endstone_stub.add_src_to_path()
+
+from endstone import Player as _StubPlayer
 from endstone_arc_shooter_game.config import (
     ConfigStore,
     build_runtime_map_cfg,
@@ -19,6 +30,7 @@ from endstone_arc_shooter_game.config import (
     normalize_weapon,
     normalize_range_cfg,
     parse_range_command_args,
+    parse_target_player_arg,
     playable_modes,
     point_in_region,
     slot_layout,
@@ -56,6 +68,23 @@ from endstone_arc_shooter_game.session import (
     first_empty_or_first,
     pick_spawn,
 )
+
+
+class _FakePlayer(_StubPlayer):
+    """测试用的假玩家（只实现插件指令路径用到的那几个属性）。
+
+    必须继承 stub 的 Player：插件里 `_is_op` 用 isinstance 判定，
+    非 Player 实例会被当成控制台（=OP）。
+    """
+
+    def __init__(self, name="Steve", op=True):
+        self.name = name
+        self.xuid = "1"
+        self.is_op = op
+        self.messages = []
+
+    def send_message(self, message):
+        self.messages.append(str(message))
 
 
 def sample_map():
@@ -1131,6 +1160,19 @@ class RangeCommandArgsTests(unittest.TestCase):
         self.assertEqual(parse_range_command_args(["entries"]), ("enter", "entries"))
 
 
+class TargetPlayerArgTests(unittest.TestCase):
+    """parse_target_player_arg：`/gs xxx [玩家名]` 的可选玩家名。"""
+
+    def test_empty_means_self(self):
+        self.assertEqual(parse_target_player_arg([]), "")
+        self.assertEqual(parse_target_player_arg(None), "")
+        self.assertEqual(parse_target_player_arg(["", "  "]), "")
+
+    def test_name_taken(self):
+        self.assertEqual(parse_target_player_arg(["Steve"]), "Steve")
+        self.assertEqual(parse_target_player_arg([" Steve ", "extra"]), "Steve")
+
+
 class RangeCommandDispatchTests(unittest.TestCase):
     """on_command 分发：`/gs range`（及 `/gs tp`）要走靶场快捷指令。
 
@@ -1149,15 +1191,17 @@ class RangeCommandDispatchTests(unittest.TestCase):
         from endstone_arc_shooter_game.arc_shooter_game_plugin import ARCShooterGamePlugin
 
         self.plugin_class = ARCShooterGamePlugin
-        self.fake_player = type(
-            "FakePlayer", (), {"name": "Steve", "xuid": "1", "is_op": True}
-        )()
+        self.fake_player = _FakePlayer()
         self.calls = []
+        self.armory_calls = []
         plugin = ARCShooterGamePlugin()
         # execute 转发时 sender 可能不是 Player 实例，这里直接给解析结果
         plugin._resolve_player_for_command_sender = lambda sender: self.fake_player
         plugin._close_open_form = lambda player: None
         plugin._handle_range_command = lambda sender, args: self.calls.append(
+            (sender, list(args))
+        )
+        plugin._handle_armory_command = lambda sender, args: self.armory_calls.append(
             (sender, list(args))
         )
         # 根菜单要摸 server，离线测试不跑它
@@ -1188,14 +1232,70 @@ class RangeCommandDispatchTests(unittest.TestCase):
         self.plugin.on_command(self.fake_player, self._command("gs"), [])
         self.assertEqual(self.calls, [])
 
-    def test_usage_list_mentions_range(self):
+    def test_gs_armory_dispatches(self):
+        self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["armory"]))
+        self.assertEqual(len(self.armory_calls), 1)
+        self.assertEqual(self.armory_calls[0][1], [])
+
+    def test_gs_arm_alias_dispatches(self):
+        self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["arm"]))
+        self.assertEqual(len(self.armory_calls), 1)
+
+    def test_gs_armory_forwards_player_name(self):
+        self.plugin.on_command(
+            self.fake_player, self._command("gs"), ["armory", "Steve"]
+        )
+        self.assertEqual(self.armory_calls[0][1], ["Steve"])
+
+    def test_usage_list_mentions_range_and_armory(self):
         usages = self.plugin_class.commands["gs"]["usages"]
         self.assertIn("/gs range", usages)
         self.assertIn("/gs range exit", usages)
+        self.assertIn("/gs armory", usages)
 
     def test_range_permission_is_default_true(self):
         perm = self.plugin_class.permissions["arc_shooter_game.command.gs"]
         self.assertIs(perm["default"], True)
+
+
+class CommandTargetResolutionTests(unittest.TestCase):
+    """_resolve_command_target：点名别人要 OP，没点名就是执行者自己。"""
+
+    def setUp(self):
+        import sys
+
+        stub_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(stub_dir) not in sys.path:
+            sys.path.insert(0, str(stub_dir))
+        import _endstone_stub_shooter as stub
+
+        stub.add_src_to_path()
+        from endstone_arc_shooter_game.arc_shooter_game_plugin import ARCShooterGamePlugin
+
+        self.plugin = ARCShooterGamePlugin()
+        self.op = _FakePlayer(name="Op", op=True)
+        self.normal = _FakePlayer(name="Steve", op=False)
+        self.plugin._resolve_player_for_command_sender = lambda sender: sender
+        self.plugin._get_player = lambda name: self.normal
+
+    def test_no_name_targets_the_sender(self):
+        self.assertIs(self.plugin._resolve_command_target(self.normal, []), self.normal)
+        self.assertEqual(self.normal.messages, [])
+
+    def test_named_target_allowed_for_op(self):
+        self.assertIs(
+            self.plugin._resolve_command_target(self.op, ["Steve"]), self.normal
+        )
+        self.assertEqual(self.op.messages, [])
+
+    def test_named_target_denied_for_normal_player(self):
+        self.assertIsNone(self.plugin._resolve_command_target(self.normal, ["Steve"]))
+        self.assertTrue(self.normal.messages)
+
+    def test_unknown_player_reports(self):
+        self.plugin._get_player = lambda name: None
+        self.assertIsNone(self.plugin._resolve_command_target(self.op, ["Nobody"]))
+        self.assertTrue(self.op.messages)
 
 
 if __name__ == "__main__":

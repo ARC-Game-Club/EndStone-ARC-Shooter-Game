@@ -44,6 +44,7 @@ from endstone_arc_shooter_game.config import (
     nearest_spawn_index,
     normalize_team_arg,
     parse_range_command_args,
+    parse_target_player_arg,
     map_incomplete_reasons,
     mode_incomplete_reasons,
     mode_playable,
@@ -224,6 +225,7 @@ class ARCShooterGamePlugin(Plugin):
                 "/gs reload",
                 "/gs range",
                 "/gs range exit",
+                "/gs armory",
             ],
             "permissions": ["arc_shooter_game.command.gs"],
         },
@@ -614,11 +616,56 @@ class ARCShooterGamePlugin(Plugin):
             # sender 指向被 as 的那个玩家，所以能替别人调用。
             self._handle_range_command(sender, args[1:])
             return True
-        if sub and sub not in ("leave", "quick", "range", "tp"):
+        if sub in ("armory", "arm"):
+            # 军械库快捷指令：/gs armory [玩家名]
+            self._handle_armory_command(sender, args[1:])
+            return True
+        if sub and sub not in ("leave", "quick", "range", "tp", "armory", "arm"):
             sender.send_message(self._t("CMD_UNKNOWN_SUB").format(sub))
             return True
         self._show_root_menu(sender)
         return True
+
+    def _resolve_command_target(self, sender: CommandSender, args: list[str]) -> Optional[Player]:
+        """解析指令里的目标玩家。
+
+        没带玩家名 → 执行者自己（经 `execute as` 转发时就是被 as 的那个玩家）；
+        带了玩家名 → 该玩家，且必须由 OP 执行。
+        返回 None 表示已经给发送者回过错误消息。
+        """
+        target_name = parse_target_player_arg(args)
+        if target_name:
+            # 替别人操作要走 OP；sender 已是玩家（on_command 里解析过），按玩家判 OP
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return None
+            target = self._get_player(target_name)
+            if target is None:
+                sender.send_message(self._t("CMD_PLAYER_NOT_FOUND").format(target_name))
+                return None
+            return target
+        target = self._resolve_player_for_command_sender(sender)
+        if target is None:
+            sender.send_message(self._t("CMD_PLAYER_ONLY"))
+            return None
+        return target
+
+    def _handle_armory_command(self, sender: CommandSender, args: list[str]) -> None:
+        """`/gs armory`：直接打开军械库表单，不用先进主菜单。
+
+        用法：
+          /gs armory              打开自己的军械库
+          /gs armory <玩家名>      打开指定玩家的军械库（需 OP）
+
+        只认 sender 不认"谁敲的命令"：经 `execute as @s run gs armory`
+        转发时 sender 指向被 as 的那个玩家，所以能替别人弹表单。
+        """
+        target = self._resolve_command_target(sender, args)
+        if target is None:
+            return
+        # 弹表单前先关掉当前表单，否则新弹窗送不到客户端
+        self._close_open_form(target)
+        self._show_armory(target)
 
     def _handle_range_command(self, sender: CommandSender, args: list[str]) -> None:
         """`/gs range`：前往靶场的快捷指令。
@@ -633,20 +680,11 @@ class ARCShooterGamePlugin(Plugin):
         转发时 sender 指向被 as 的那个玩家，所以命令方块/脚本能替别人调用。
         """
         action, target_name = parse_range_command_args(args)
-        if target_name:
-            # 替别人操作要走 OP；sender 已是玩家（上面解析过），按玩家判 OP
-            if not self._is_op(sender):
-                sender.send_message(self._t("CMD_NO_PERMISSION"))
-                return
-            target = self._get_player(target_name)
-            if target is None:
-                sender.send_message(self._t("RANGE_CMD_TARGET_NOT_FOUND").format(target_name))
-                return
-        else:
-            target = self._resolve_player_for_command_sender(sender)
-            if target is None:
-                sender.send_message(self._t("CMD_PLAYER_ONLY"))
-                return
+        target = self._resolve_command_target(
+            sender, [target_name] if target_name else []
+        )
+        if target is None:
+            return
         # 进靶场前先关掉当前表单：进靶场后要靠按钮唤出靶场菜单/军械库，
         # 旧表单不关的话新弹窗出不来
         self._close_open_form(target)
