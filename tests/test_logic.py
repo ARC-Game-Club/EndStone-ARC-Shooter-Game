@@ -29,8 +29,6 @@ from endstone_arc_shooter_game.config import (
     normalize_team_arg,
     normalize_weapon,
     normalize_range_cfg,
-    parse_range_command_args,
-    parse_target_player_arg,
     playable_modes,
     point_in_region,
     slot_layout,
@@ -1131,50 +1129,8 @@ class RangeCfgTests(unittest.TestCase):
         )
 
 
-class RangeCommandArgsTests(unittest.TestCase):
-    """parse_range_command_args：`/gs range [exit] [玩家名]` 解析。"""
-
-    def test_no_args_defaults_to_enter_self(self):
-        self.assertEqual(parse_range_command_args([]), ("enter", ""))
-        self.assertEqual(parse_range_command_args(None), ("enter", ""))
-        self.assertEqual(parse_range_command_args([""]), ("enter", ""))
-
-    def test_exit_aliases(self):
-        for word in ("exit", "leave", "out", "quit", "EXIT"):
-            self.assertEqual(parse_range_command_args([word]), ("exit", ""), word)
-
-    def test_enter_aliases(self):
-        for word in ("enter", "in", "go", "tp", "join", "entry", "back"):
-            self.assertEqual(parse_range_command_args([word]), ("enter", ""), word)
-
-    def test_player_name_without_action(self):
-        self.assertEqual(parse_range_command_args(["Steve"]), ("enter", "Steve"))
-        self.assertEqual(parse_range_command_args(["Steve", "x"]), ("enter", "Steve"))
-
-    def test_action_then_player_name(self):
-        self.assertEqual(parse_range_command_args(["exit", "Steve"]), ("exit", "Steve"))
-        self.assertEqual(parse_range_command_args(["leave", "Steve"]), ("exit", "Steve"))
-
-    def test_player_name_named_like_action_word(self):
-        # 已知动作词优先当动作；拼写相近但未登记的当玩家名
-        self.assertEqual(parse_range_command_args(["entries"]), ("enter", "entries"))
-
-
-class TargetPlayerArgTests(unittest.TestCase):
-    """parse_target_player_arg：`/gs xxx [玩家名]` 的可选玩家名。"""
-
-    def test_empty_means_self(self):
-        self.assertEqual(parse_target_player_arg([]), "")
-        self.assertEqual(parse_target_player_arg(None), "")
-        self.assertEqual(parse_target_player_arg(["", "  "]), "")
-
-    def test_name_taken(self):
-        self.assertEqual(parse_target_player_arg(["Steve"]), "Steve")
-        self.assertEqual(parse_target_player_arg([" Steve ", "extra"]), "Steve")
-
-
 class RangeCommandDispatchTests(unittest.TestCase):
-    """on_command 分发：`/gs range`（及 `/gs tp`）要走靶场快捷指令。
+    """on_command 分发：`/gs range`（及 `/gs tp`）、`/gs armory` 要走对应快捷指令。
 
     插件模块依赖 endstone，离线测试用仓库 scripts/ 里的 stub 顶替。
     """
@@ -1198,12 +1154,8 @@ class RangeCommandDispatchTests(unittest.TestCase):
         # execute 转发时 sender 可能不是 Player 实例，这里直接给解析结果
         plugin._resolve_player_for_command_sender = lambda sender: self.fake_player
         plugin._close_open_form = lambda player: None
-        plugin._handle_range_command = lambda sender, args: self.calls.append(
-            (sender, list(args))
-        )
-        plugin._handle_armory_command = lambda sender, args: self.armory_calls.append(
-            (sender, list(args))
-        )
+        plugin._handle_range_command = lambda sender: self.calls.append(sender)
+        plugin._handle_armory_command = lambda sender: self.armory_calls.append(sender)
         # 根菜单要摸 server，离线测试不跑它
         plugin._show_root_menu = lambda player: None
         self.plugin = plugin
@@ -1215,18 +1167,10 @@ class RangeCommandDispatchTests(unittest.TestCase):
     def test_gs_range_dispatches(self):
         self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["range"]))
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0][1], [])
 
     def test_gs_tp_alias_dispatches(self):
         self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["tp"]))
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0][1], [])
-
-    def test_gs_range_forwards_rest_args(self):
-        self.plugin.on_command(
-            self.fake_player, self._command("gs"), ["range", "exit", "Steve"]
-        )
-        self.assertEqual(self.calls[0][1], ["exit", "Steve"])
 
     def test_gs_without_sub_does_not_dispatch_range(self):
         self.plugin.on_command(self.fake_player, self._command("gs"), [])
@@ -1235,31 +1179,40 @@ class RangeCommandDispatchTests(unittest.TestCase):
     def test_gs_armory_dispatches(self):
         self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["armory"]))
         self.assertEqual(len(self.armory_calls), 1)
-        self.assertEqual(self.armory_calls[0][1], [])
 
     def test_gs_arm_alias_dispatches(self):
         self.assertTrue(self.plugin.on_command(self.fake_player, self._command("gs"), ["arm"]))
         self.assertEqual(len(self.armory_calls), 1)
 
-    def test_gs_armory_forwards_player_name(self):
-        self.plugin.on_command(
-            self.fake_player, self._command("gs"), ["armory", "Steve"]
-        )
-        self.assertEqual(self.armory_calls[0][1], ["Steve"])
-
     def test_usage_list_mentions_range_and_armory(self):
         usages = self.plugin_class.commands["gs"]["usages"]
         self.assertIn("/gs range", usages)
-        self.assertIn("/gs range exit", usages)
         self.assertIn("/gs armory", usages)
 
     def test_range_permission_is_default_true(self):
         perm = self.plugin_class.permissions["arc_shooter_game.command.gs"]
         self.assertIs(perm["default"], True)
 
+    def test_gs_usages_never_exceed_two_segments(self):
+        """BDS 的命令语法树最多两段：`/gs` + 一个子命令。
 
-class CommandTargetResolutionTests(unittest.TestCase):
-    """_resolve_command_target：点名别人要 OP，没点名就是执行者自己。"""
+        曾经注册了 `/gs range exit`（三段），结果 BDS 把 "range" 判成
+        Unexpected，命令根本进不到插件。命令行最多两段，别再加第三段。
+        """
+        for usage in self.plugin_class.commands["gs"]["usages"]:
+            segments = usage.split()
+            self.assertLessEqual(
+                len(segments), 2, f"{usage} 超过两段，BDS 会解析失败"
+            )
+
+    def test_no_usage_mentions_range_subcommands(self):
+        usages = self.plugin_class.commands["gs"]["usages"]
+        self.assertNotIn("/gs range exit", usages)
+        self.assertEqual([u for u in usages if u.startswith("/gs range")], ["/gs range"])
+
+
+class RangeToggleTests(unittest.TestCase):
+    """`/gs range` 是开关：不在靶场→进，已在靶场→出。"""
 
     def setUp(self):
         import sys
@@ -1273,29 +1226,25 @@ class CommandTargetResolutionTests(unittest.TestCase):
         from endstone_arc_shooter_game.arc_shooter_game_plugin import ARCShooterGamePlugin
 
         self.plugin = ARCShooterGamePlugin()
-        self.op = _FakePlayer(name="Op", op=True)
-        self.normal = _FakePlayer(name="Steve", op=False)
-        self.plugin._resolve_player_for_command_sender = lambda sender: sender
-        self.plugin._get_player = lambda name: self.normal
+        self.player = _FakePlayer()
+        self.entered = []
+        self.exited = []
+        self.plugin._resolve_player_for_command_sender = lambda sender: self.player
+        self.plugin._close_open_form = lambda player: None
+        self.plugin._enter_shooting_range = lambda player: self.entered.append(player)
+        self.plugin._exit_range = lambda player: self.exited.append(player)
+        self.plugin.range_players = {}
 
-    def test_no_name_targets_the_sender(self):
-        self.assertIs(self.plugin._resolve_command_target(self.normal, []), self.normal)
-        self.assertEqual(self.normal.messages, [])
+    def test_enters_when_not_in_range(self):
+        self.plugin._handle_range_command(self.player)
+        self.assertEqual(len(self.entered), 1)
+        self.assertEqual(self.exited, [])
 
-    def test_named_target_allowed_for_op(self):
-        self.assertIs(
-            self.plugin._resolve_command_target(self.op, ["Steve"]), self.normal
-        )
-        self.assertEqual(self.op.messages, [])
-
-    def test_named_target_denied_for_normal_player(self):
-        self.assertIsNone(self.plugin._resolve_command_target(self.normal, ["Steve"]))
-        self.assertTrue(self.normal.messages)
-
-    def test_unknown_player_reports(self):
-        self.plugin._get_player = lambda name: None
-        self.assertIsNone(self.plugin._resolve_command_target(self.op, ["Nobody"]))
-        self.assertTrue(self.op.messages)
+    def test_exits_when_already_in_range(self):
+        self.plugin.range_players[self.player.name] = 123.0
+        self.plugin._handle_range_command(self.player)
+        self.assertEqual(len(self.exited), 1)
+        self.assertEqual(self.entered, [])
 
 
 if __name__ == "__main__":

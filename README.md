@@ -33,8 +33,8 @@ plugins/ARCShooterGame/
 | `/gs` | 主菜单：大厅列表 / 军械库 / 枪手排行榜 / 个人信息 / 配置地图（OP） |
 | `/gs quick` | 快速开始：有房就进、没房就开一间（纯命令路径，不弹表单，AI 假人也能用） |
 | `/gs leave` | 离开大厅或比赛 |
-| `/gs range [exit] [玩家名]` | 靶场快捷指令：进靶场 / 退出靶场（已在靶场内则回到入口）；带玩家名需 OP |
-| `/gs armory [玩家名]` | 直接打开军械库表单；带玩家名需 OP |
+| `/gs range` | 靶场开关：不在靶场 → 进靶场；已在靶场 → 退出靶场（恢复进入前的背包与位置） |
+| `/gs armory` | 直接打开军械库表单 |
 | `/gs reload` | OP：重载地图、武器、设置 |
 | `/addspawn <模式> [队伍]` | OP：把脚下位置加为所在地图的出生点（红蓝队模式带队伍 red/blue/红/蓝，可简写 `/addspawn red`；个人死斗 `/addspawn ffa`） |
 | `/rmspawn <模式> [队伍]` | OP：删除脚下 3 格内最近的指定出生点（参数同上） |
@@ -44,13 +44,20 @@ plugins/ARCShooterGame/
 
 > `/gs range` 与 `/gs armory` **只认"执行者"**：经 `execute as @s run gs range` 转发时，
 > 作用对象是被 `as` 的那个玩家，所以命令方块 / 脚本能替别人调用。
-> `/gs` 的权限对所有玩家开放（`default: True`），不点名就不会触发 OP 检查。
+> `/gs` 的权限对所有玩家开放（`default: True`）。
+
+> ⚠ **命令最多两段**（`/gs` + 一个子命令）。BDS 的命令语法树不接受三段，
+> 注册了 `/gs range exit` 这种用法后，BDS 会把 `range` 判成 Unexpected，
+> 整条 `gs` 命令都进不到插件（客户端报 `Syntax error: Unexpected "range"`）。
+> 所以靶场进出做成**一条 `/gs range` 的开关**，不另开子命令。
+> 插件里有单测守着：`tests/test_logic.py::RangeCommandDispatchTests::
+> test_gs_usages_never_exceed_two_segments`。
 
 ## 靶场
 
 OP 用 `/setrange pos1`、`/setrange pos2` 圈出靶场范围，站在希望玩家落地的位置执行 `/setrange entry`。
 
-玩家从 `/gs` 主菜单点 **靶场** 进入：清空并快照随身物品 → 传送到入口 → 按当前军械库配装发放测试武器 + 弧光币。靶场内开火免伤；手持弧光币右键打开靶场菜单（军械库换配装 / 补发弹药 / 回入口 / 退出）。退出或掉线会自动恢复进入前的背包、位置与游戏模式。
+玩家可以用 `/gs range` 直接进靶场，或从 `/gs` 主菜单点 **靶场**：清空并快照随身物品 → 传送到入口 → 按当前军械库配装发放测试武器 + 弧光币。靶场内开火免伤；手持弧光币右键打开靶场菜单（军械库换配装 / 补发弹药 / 回入口 / 退出）。退出或掉线会自动恢复进入前的背包、位置与游戏模式。
 
 ## 军械库与等级
 
@@ -178,15 +185,29 @@ python -m unittest tests.test_logic # 只跑逻辑测试
 
 ## 更新日志
 
+### v0.4.33
+
+- **修掉「命令进不去」**：v0.4.31/32 注册了 `/gs range exit`（三段），BDS 的命令语法树
+  最多只认两段，于是把 `range` 判成 Unexpected，客户端报
+  `Syntax error: Unexpected "range"`，命令根本进不到插件（日志里只有
+  `issued server command: /gs range`，没有任何 `tp` 派发）
+- **`/gs range` 改成开关**：不在靶场 → 进靶场；已在靶场 → 退出靶场。
+  进出共用一条两段指令，不再需要 `/gs range exit`
+- `/gs armory` 同理去掉 `[玩家名]`（三段也过不去）；替别人调用统一走
+  `execute as <玩家名> run gs range`
+- 删掉因此用不上的 `parse_range_command_args` / `parse_target_player_arg` /
+  `_resolve_command_target` 与四个语言键
+- **加回归护栏**：`tests/test_logic.py` 断言 `gs` 的 usage 永远不超过两段，
+  以后再有人加三段子命令会被测试拦下
+
 ### v0.4.32
 
-- **军械库快捷指令**：新增 `/gs armory [玩家名]`（`/gs arm` 同义）——直接弹军械库表单，不用先进主菜单；带玩家名需 OP
-- 抽出 `_resolve_command_target` 统一 `/gs range` 与 `/gs armory` 的目标解析：没带名字 = 执行者自己，带名字 = 需 OP 且要在线
-- `RANGE_CMD_TARGET_NOT_FOUND` 泛化为 `CMD_PLAYER_NOT_FOUND`
+- **军械库快捷指令**：新增 `/gs armory`（`/gs arm` 同义）——直接弹军械库表单，不用先进主菜单
+- ⚠ 本版的 `/gs range exit`（三段）会让 BDS 整条 `gs` 命令解析失败，已在 v0.4.33 修掉
 
 ### v0.4.31
 
-- **靶场快捷指令**：新增 `/gs range [exit] [玩家名]`（`/gs tp` 同义）——直达靶场，不再走菜单
+- **靶场快捷指令**：新增 `/gs range`（`/gs tp` 同义）——直达靶场，不再走菜单
 - 指令只认 sender 不认"谁敲的命令"，`execute as @s run gs range` 可替别人调用；`/gs` 权限保持 `default: True`，普通玩家可自行进出靶场
 - **修掉"弹窗出不来"**：BDS 一个玩家同时只能挂一个表单，不先关就发新的客户端收不到。新增 `_close_open_form`，所有表单发送前先关旧表单（全插件 25 处表单受益），与弧光核心 `/arc` 的处理一致
 - `_show_range_menu` 原先直接调 `player.send_form()` 绕过统一出口，顺手改走 `_send_form`，补上"模拟玩家无客户端"的防护

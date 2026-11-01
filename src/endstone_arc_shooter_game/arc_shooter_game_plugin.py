@@ -43,8 +43,6 @@ from endstone_arc_shooter_game.config import (
     has_region,
     nearest_spawn_index,
     normalize_team_arg,
-    parse_range_command_args,
-    parse_target_player_arg,
     map_incomplete_reasons,
     mode_incomplete_reasons,
     mode_playable,
@@ -224,7 +222,6 @@ class ARCShooterGamePlugin(Plugin):
                 "/gs leave",
                 "/gs reload",
                 "/gs range",
-                "/gs range exit",
                 "/gs armory",
             ],
             "permissions": ["arc_shooter_game.command.gs"],
@@ -611,14 +608,14 @@ class ARCShooterGamePlugin(Plugin):
             self._handle_quick_join(sender)
             return True
         if sub in ("range", "tp"):
-            # 靶场快捷指令：/gs range [exit] [玩家名]
+            # 靶场开关：/gs range（不在靶场→进；在靶场→出）
             # 只认 sender 不认"谁敲的命令"——`execute as @s run gs range` 时
             # sender 指向被 as 的那个玩家，所以能替别人调用。
-            self._handle_range_command(sender, args[1:])
+            self._handle_range_command(sender)
             return True
         if sub in ("armory", "arm"):
-            # 军械库快捷指令：/gs armory [玩家名]
-            self._handle_armory_command(sender, args[1:])
+            # 军械库快捷指令：/gs armory
+            self._handle_armory_command(sender)
             return True
         if sub and sub not in ("leave", "quick", "range", "tp", "armory", "arm"):
             sender.send_message(self._t("CMD_UNKNOWN_SUB").format(sub))
@@ -626,79 +623,50 @@ class ARCShooterGamePlugin(Plugin):
         self._show_root_menu(sender)
         return True
 
-    def _resolve_command_target(self, sender: CommandSender, args: list[str]) -> Optional[Player]:
-        """解析指令里的目标玩家。
+    def _resolve_executing_player(self, sender: CommandSender) -> Optional[Player]:
+        """解析"执行者"玩家。
 
-        没带玩家名 → 执行者自己（经 `execute as` 转发时就是被 as 的那个玩家）；
-        带了玩家名 → 该玩家，且必须由 OP 执行。
-        返回 None 表示已经给发送者回过错误消息。
+        经 `execute as @s run gs range` 转发时，sender 指向被 as 的那个玩家
+        （可能不是 Player 实例，按名字解析在线玩家）。解析不到就回一句提示。
         """
-        target_name = parse_target_player_arg(args)
-        if target_name:
-            # 替别人操作要走 OP；sender 已是玩家（on_command 里解析过），按玩家判 OP
-            if not self._is_op(sender):
-                sender.send_message(self._t("CMD_NO_PERMISSION"))
-                return None
-            target = self._get_player(target_name)
-            if target is None:
-                sender.send_message(self._t("CMD_PLAYER_NOT_FOUND").format(target_name))
-                return None
-            return target
-        target = self._resolve_player_for_command_sender(sender)
-        if target is None:
+        player = self._resolve_player_for_command_sender(sender)
+        if player is None:
             sender.send_message(self._t("CMD_PLAYER_ONLY"))
             return None
-        return target
+        return player
 
-    def _handle_armory_command(self, sender: CommandSender, args: list[str]) -> None:
+    def _handle_armory_command(self, sender: CommandSender) -> None:
         """`/gs armory`：直接打开军械库表单，不用先进主菜单。
-
-        用法：
-          /gs armory              打开自己的军械库
-          /gs armory <玩家名>      打开指定玩家的军械库（需 OP）
 
         只认 sender 不认"谁敲的命令"：经 `execute as @s run gs armory`
         转发时 sender 指向被 as 的那个玩家，所以能替别人弹表单。
         """
-        target = self._resolve_command_target(sender, args)
-        if target is None:
+        player = self._resolve_executing_player(sender)
+        if player is None:
             return
         # 弹表单前先关掉当前表单，否则新弹窗送不到客户端
-        self._close_open_form(target)
-        self._show_armory(target)
+        self._close_open_form(player)
+        self._show_armory(player)
 
-    def _handle_range_command(self, sender: CommandSender, args: list[str]) -> None:
-        """`/gs range`：前往靶场的快捷指令。
+    def _handle_range_command(self, sender: CommandSender) -> None:
+        """`/gs range`：靶场开关，一条指令进出通用。
 
-        用法：
-          /gs range                 执行者自己进靶场（已在靶场则回到入口）
-          /gs range exit            执行者退出靶场（恢复进入前的背包与位置）
-          /gs range <玩家名>         指定玩家进靶场（需 OP）
-          /gs range exit <玩家名>    指定玩家退出靶场（需 OP）
+        不在靶场 → 进靶场（快照随身物品、传送到入口、按配装发测试武器）；
+        已在靶场 → 离开靶场（恢复进入前的背包、位置与游戏模式）。
 
         刻意只认 sender、不认"谁敲的命令"：经 `execute as @s run gs range`
         转发时 sender 指向被 as 的那个玩家，所以命令方块/脚本能替别人调用。
         """
-        action, target_name = parse_range_command_args(args)
-        target = self._resolve_command_target(
-            sender, [target_name] if target_name else []
-        )
-        if target is None:
+        player = self._resolve_executing_player(sender)
+        if player is None:
             return
-        # 进靶场前先关掉当前表单：进靶场后要靠按钮唤出靶场菜单/军械库，
+        # 进/出靶场前先关掉当前表单：靶场菜单、军械库都要靠按钮唤出，
         # 旧表单不关的话新弹窗出不来
-        self._close_open_form(target)
-        if action == "exit":
-            if not self._in_range(target):
-                target.send_message(self._t("RANGE_NOT_IN"))
-                return
-            self._exit_range(target)
+        self._close_open_form(player)
+        if self._in_range(player):
+            self._exit_range(player)
             return
-        sender_name = str(getattr(sender, "name", "") or "").strip()
-        target_name_now = self._player_name(target)
-        if sender_name and target_name_now and sender_name.lower() != target_name_now.lower():
-            target.send_message(self._t("RANGE_TP_BY_OTHER").format(sender_name))
-        self._enter_shooting_range(target)
+        self._enter_shooting_range(player)
 
     def _handle_quick_join(self, player: Player, *, quiet: bool = False) -> None:
         """快速开始：立刻加入一个能进的房间；没有就创建一间。
