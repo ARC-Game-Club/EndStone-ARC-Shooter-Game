@@ -1,6 +1,6 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.4.18-blue.svg)](https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.4.32-blue.svg)](https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
@@ -31,13 +31,20 @@ plugins/ARCShooterGame/
 | 指令 | 说明 |
 |---|---|
 | `/gs` | 主菜单：大厅列表 / 军械库 / 枪手排行榜 / 个人信息 / 配置地图（OP） |
+| `/gs quick` | 快速开始：有房就进、没房就开一间（纯命令路径，不弹表单，AI 假人也能用） |
 | `/gs leave` | 离开大厅或比赛 |
+| `/gs range [exit] [玩家名]` | 靶场快捷指令：进靶场 / 退出靶场（已在靶场内则回到入口）；带玩家名需 OP |
+| `/gs armory [玩家名]` | 直接打开军械库表单；带玩家名需 OP |
 | `/gs reload` | OP：重载地图、武器、设置 |
 | `/addspawn <模式> [队伍]` | OP：把脚下位置加为所在地图的出生点（红蓝队模式带队伍 red/blue/红/蓝，可简写 `/addspawn red`；个人死斗 `/addspawn ffa`） |
 | `/rmspawn <模式> [队伍]` | OP：删除脚下 3 格内最近的指定出生点（参数同上） |
 | `/setrange <pos1\|pos2\|entry\|show\|clear>` | OP：配置靶场范围两角与传送点（走到对应位置执行） |
 
 比赛中 **弧光币（快捷栏第 9 格）右键** 打开军械库：仅在开局购买/配置窗或重生无敌窗内可换装；超时后弧光币收回。
+
+> `/gs range` 与 `/gs armory` **只认"执行者"**：经 `execute as @s run gs range` 转发时，
+> 作用对象是被 `as` 的那个玩家，所以命令方块 / 脚本能替别人调用。
+> `/gs` 的权限对所有玩家开放（`default: True`），不点名就不会触发 OP 检查。
 
 ## 靶场
 
@@ -162,10 +169,34 @@ QQ_REPORT_END=1
 ## 本地测试（不需要 Endstone）
 
 ```bash
-python -m unittest tests.test_logic
+python -m pytest tests/            # 全量（含 test_qq_report）
+python -m unittest tests.test_logic # 只跑逻辑测试
 ```
 
+插件模块依赖 endstone，测试用 `scripts/_endstone_stub_shooter.py` 顶替，
+`tests/test_logic.py` 导入时自动把 `src/` 挂上 `sys.path`，**不需要设 PYTHONPATH**。
+
 ## 更新日志
+
+### v0.4.32
+
+- **军械库快捷指令**：新增 `/gs armory [玩家名]`（`/gs arm` 同义）——直接弹军械库表单，不用先进主菜单；带玩家名需 OP
+- 抽出 `_resolve_command_target` 统一 `/gs range` 与 `/gs armory` 的目标解析：没带名字 = 执行者自己，带名字 = 需 OP 且要在线
+- `RANGE_CMD_TARGET_NOT_FOUND` 泛化为 `CMD_PLAYER_NOT_FOUND`
+
+### v0.4.31
+
+- **靶场快捷指令**：新增 `/gs range [exit] [玩家名]`（`/gs tp` 同义）——直达靶场，不再走菜单
+- 指令只认 sender 不认"谁敲的命令"，`execute as @s run gs range` 可替别人调用；`/gs` 权限保持 `default: True`，普通玩家可自行进出靶场
+- **修掉"弹窗出不来"**：BDS 一个玩家同时只能挂一个表单，不先关就发新的客户端收不到。新增 `_close_open_form`，所有表单发送前先关旧表单（全插件 25 处表单受益），与弧光核心 `/arc` 的处理一致
+- `_show_range_menu` 原先直接调 `player.send_form()` 绕过统一出口，顺手改走 `_send_form`，补上"模拟玩家无客户端"的防护
+- 语言母版 `plugins/ARCShooterGame/ZH-CN.txt` 补齐缺失的 `RANGE_*` / `ARMOR_*` / `SPAWN_CMD_*` 共 43 个键（部署脚本会用它覆盖服务器那份，少键会在部署时被冲掉）
+
+### v0.4.30
+
+- **房间创建即补位**：真人建房后自动拉 AI 假人补位，不再出现"真人建了房没人来"
+- **指定房间加入**：`api_quick_join(..., lobby_id=)` 只进指定房间，塞不下就失败、不新建房
+- **全 AI 房间自动开局**：房里全是 AI 时自动开局；有真人不抢房主的开局权
 
 ### v0.4.29
 
