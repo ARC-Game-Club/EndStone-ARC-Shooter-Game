@@ -273,6 +273,11 @@ class ARCShooterGamePlugin(Plugin):
         self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
         self._spawn_protect_until: Dict[str, float] = {}
+        # 无敌窗的"来源"和"开始时刻"，只用于日志（排查"为什么打不动"）。
+        # 2026-11-01 服主实测：真人对局里打假人，中途出现 3~4 秒"无敌中"，
+        # 而假人头顶没显示[无敌状态]，分不清是哪条路开的保护窗。
+        self._spawn_protect_reason: Dict[str, str] = {}
+        self._spawn_protect_started: Dict[str, float] = {}
         self._armory_edit_preset: Dict[str, int] = {}
         # 处于开局准备阶段（STATE_BUYING）内被冻结的玩家。
         # 通过 attribute 命令设 minecraft:movement base=0；窗口结束自动恢复。
@@ -1321,12 +1326,14 @@ class ARCShooterGamePlugin(Plugin):
             if lobby.state == STATE_BUYING and strategy.uses_buy_phase:
                 # 中途加入开局准备窗：继承剩余时长（2026-09-05 取消冻结移速）
                 remaining = max(1, int(math.ceil(lobby.buy_remaining())))
-                self._apply_spawn_protect(player, duration=remaining)
+                self._apply_spawn_protect(
+                    player, duration=remaining, reason="中途加入·准备阶段")
             elif lobby.state == STATE_PLAYING:
                 self._apply_match_buffs(player)
                 # 中途加入 STATE_PLAYING：按复活无敌时长开；不冻结移速
                 self._apply_spawn_protect(
-                    player, duration=self._respawn_invuln_window_seconds()
+                    player, duration=self._respawn_invuln_window_seconds(),
+                    reason="中途加入·对局中",
                 )
             self._show_match_menu(player, lobby)
             return
@@ -1526,7 +1533,8 @@ class ARCShooterGamePlugin(Plugin):
             self._prepare_fighter(member, lobby)
             self._restore_player_loadout(member, lobby, gadgets=True)
             if buy_seconds > 0:
-                self._apply_spawn_protect(member, duration=buy_seconds)
+                self._apply_spawn_protect(member, duration=buy_seconds,
+                                          reason="开局准备阶段")
                 # 注：2026-09-05 取消 _set_preparation_freeze（让玩家准备时间自由跑）
         self._apply_lobby_name_tags(lobby)
         lobby.begin_buy(buy_seconds, now)
@@ -1557,14 +1565,21 @@ class ARCShooterGamePlugin(Plugin):
         match_seconds = lobby.match_time_seconds
         lobby.begin_playing(match_seconds, now)
         for ps in lobby.online_players():
+            # ⚠️ 取消无敌窗**必须放在拿玩家句柄之前**。
+            #
+            # 老顺序是 `member = self._get_player(...)` → `if member is None:
+            # continue` → 再 `pop(_spawn_protect_until)`。于是拿不到句柄的玩家
+            # （模拟玩家尤其常见：`server.get_player()` 有时给 None）**永远
+            # 取消不了自己的无敌窗**，只能等它自然到期——表现就是"对局已经
+            # 开打了，打他还在掉血 0，且头顶没有[无敌状态]提示"
+            # （2026-11-01 服主实测）。
+            # 清记账不需要玩家对象，先无条件清掉。
+            self._log_protect_end(ps.name, "进入对局")
             member = self._get_player(ps.name)
             if member is None:
                 continue
             self._clear_preparation_freeze(member)
             self._take_arc_coin(member)
-            # 把开局准备窗 timer 显式弹出，避免 20s 后 _expire_purchase_windows
-            # 误发"保护时间结束"之类的过期提示；进入对局通过 toast/broadcast 提示。
-            self._spawn_protect_until.pop(ps.name, None)
             self._apply_match_buffs(member)
             self._apply_team_name_tag(member, lobby)
             # === 2026-09-05：比赛开始时再 tp 一次（保险，护甲已在 _prepare_fighter 发过） ===
@@ -1682,13 +1697,15 @@ class ARCShooterGamePlugin(Plugin):
             # 复活后只开短无敌窗：无敌 + 弧光币（默认 3s）。不冻结移速，
             # 玩家复活即可自由跑位（同时拿 speed 效果）。
             self._apply_spawn_protect(
-                player, duration=self._respawn_invuln_window_seconds()
+                player, duration=self._respawn_invuln_window_seconds(),
+                reason="复活",
             )
         elif lobby.state == STATE_BUYING:
             # 极端情况：开局阶段玩家被踢出又重新加入。沿用剩余开局准备时长
             # （2026-09-05 取消冻结移速）。
             remaining = max(1, int(math.ceil(lobby.buy_remaining())))
-            self._apply_spawn_protect(player, duration=remaining)
+            self._apply_spawn_protect(player, duration=remaining,
+                                      reason="准备阶段重新加入")
 
     def _respawn_in_match_by_name(self, player_name: str, lobby_id: str) -> None:
         player = self._get_player(player_name)
@@ -1789,7 +1806,8 @@ class ARCShooterGamePlugin(Plugin):
             if until is not None and now >= until
         ]
         for name in expired:
-            self._spawn_protect_until.pop(name, None)
+            # _log_protect_end 自己会 pop 记账（带"持续多久"的日志）
+            self._log_protect_end(name, "自然到期")
             player = self._get_player(name)
             if player is None:
                 continue
@@ -2679,7 +2697,7 @@ class ARCShooterGamePlugin(Plugin):
                 self.logger.error(f"[ARCShooterGame] apply match buff {effect} error: {e}")
 
     def _clear_match_effects(self, player_name: str) -> None:
-        self._spawn_protect_until.pop(player_name, None)
+        self._log_protect_end(player_name, "清场/离开对局")
         core = self._attr_core()
         if core is None:
             return
@@ -2702,22 +2720,60 @@ class ARCShooterGamePlugin(Plugin):
         return True
 
     def _apply_spawn_protect(
-        self, player: Player, duration: Optional[float] = None
+        self, player: Player, duration: Optional[float] = None,
+        reason: str = "",
     ) -> None:
         """开启玩家无敌窗：无敌 + 发放弧光币（不冻结移速）。
         冻结（walk_speed=0）只在开局准备阶段需要，调用方应额外调用
         _set_preparation_freeze；复活场景不需要冻结，玩家复活即可自由行动。
         duration=None 时回退到开局长度（self._preparation_window_seconds）。
+
+        `reason` 只用于日志：排查"打不动"时，必须能一眼看出这个无敌窗
+        是哪条路开的（开局准备 / 复活 / 中途加入 / 重新加入）。
         """
         if duration is None:
             duration = self._preparation_window_seconds()
         if duration <= 0:
             return
         self._spawn_protect_until[player.name] = time.time() + float(duration)
+        self._log_protect_start(player.name, float(duration), reason)
         self._give_arc_coin(player)
         lobby = self._lobby_of(player.name)
         if lobby is not None:
             self._apply_team_name_tag(player, lobby)
+
+    @staticmethod
+    def _fmt_clock(ts: Optional[float]) -> str:
+        if not ts:
+            return "?"
+        return time.strftime("%H:%M:%S", time.localtime(ts))
+
+    def _log_protect_start(self, player_name: str, duration: float,
+                           reason: str) -> None:
+        """无敌窗开始：谁、多久、为什么、到几点结束。"""
+        self._spawn_protect_reason[player_name] = str(reason or "未标注")
+        self._spawn_protect_started[player_name] = time.time()
+        until = self._spawn_protect_until.get(player_name)
+        self.logger.info(
+            f"[无敌] {player_name} 开始 {duration:.1f}s"
+            f"（来源 {reason or '未标注'}，到 {self._fmt_clock(until)}）")
+
+    def _log_protect_end(self, player_name: str, why: str) -> None:
+        """无敌窗结束：因为什么结束、持续了多久、还剩多少被取消。
+
+        ⚠️ 这个方法自己会 `pop` 记账，调用方不要再 pop。
+        """
+        until = self._spawn_protect_until.pop(player_name, None)
+        started = self._spawn_protect_started.pop(player_name, None)
+        reason = self._spawn_protect_reason.pop(player_name, "")
+        if until is None and started is None:
+            return          # 本来就没有无敌窗，不用刷日志
+        parts = [f"来源 {reason or '未标注'}"]
+        if started is not None:
+            parts.append(f"已持续 {max(0.0, time.time() - started):.1f}s")
+        if until is not None:
+            parts.append(f"取消时剩 {max(0.0, until - time.time()):.1f}s")
+        self.logger.info(f"[无敌] {player_name} 结束（{why}）：" + "，".join(parts))
 
     def _set_preparation_freeze(self, player: Player) -> None:
         """将玩家移入准备时间窗（仅记账）。
