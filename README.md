@@ -185,6 +185,25 @@ python -m unittest tests.test_logic # 只跑逻辑测试
 
 ## 更新日志
 
+### v0.4.35
+
+- **接上假人插件 3.10.0 的两个事件钩子**（上游重构后假人改成事件驱动，
+  这两处不接就断）：
+  - **大厅创建 → `api_shooter_lobby_created(lobby_id, event_id)`**：
+    假人插件 3.10.0 移除了 30 秒 quick 轮询心跳，只剩「上线事件 +
+    大厅创建事件」两个入口。而本插件原来的 `_maybe_fill_with_bots`
+    **只在真人触发时补位**（假人触发会被跳过以防循环补人）——
+    于是**假人自己建的那间房永远只有它自己**。现在每次建房都通知一次。
+    不会递归：假人插件按 event_id 去重，补位又指定了 lobby_id，塞不下
+    就失败，不会各自另开新房。
+  - **对局结算 → `api_environment_event(name, text, settlement=True)`**：
+    枪战模式下假人**不主动说话**（需求文档 §1），只在被点名或收到
+    **结算类**事件时开口。⚠️ `settlement` 必须传 `True`——假人侧把非
+    结算事件在枪战模式下一律拒收（`mode == "gun_game" and not
+    settlement`），漏传就赛后再也不开口，而且**不报错**。
+- 新增 `tests/test_ai_integration_hooks.py`（12 项），把上面两个钩子
+  钉死，尤其钉住 `settlement=True` 这个参数。
+
 ### v0.4.34
 
 - **无敌窗有日志了（开始 / 结束都能对上）**：服主实测「对局里打假人，

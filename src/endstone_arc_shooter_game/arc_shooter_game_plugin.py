@@ -279,6 +279,12 @@ class ARCShooterGamePlugin(Plugin):
         self._spawn_protect_reason: Dict[str, str] = {}
         self._spawn_protect_started: Dict[str, float] = {}
         self._armory_edit_preset: Dict[str, int] = {}
+        # 大厅创建事件的序号。假人插件 3.10.0 起把"自动 quick"改成
+        # **事件驱动**（30 秒轮询心跳被移除），新建房间必须由我们主动
+        # 通知它补位，否则新房间再也不会有假人进来。
+        # 大厅 ID 是 8 位 hex，理论上会重用，所以事件号带上自增序号，
+        # 免得假人插件那侧的 event_id 去重把两次建房当成同一件事。
+        self._lobby_event_seq = 0
         # 处于开局准备阶段（STATE_BUYING）内被冻结的玩家。
         # 通过 attribute 命令设 minecraft:movement base=0；窗口结束自动恢复。
         # 复活（STATE_PLAYING）的无敌窗不再冻结移速，玩家可自由跑位。
@@ -1298,6 +1304,34 @@ class ARCShooterGamePlugin(Plugin):
         # `Lobby.join()` 不是 `_join_lobby()`，钩子漏掉了——结果就是
         # "真人建了房，房间一直空着没人来"。
         self._maybe_fill_with_bots(lobby, trigger=player)
+        # 假人插件 3.10.0 起是事件驱动：没有轮询心跳了。除了"真人触发"
+        # 那一路，还得在**每次建房**时主动通知一次——尤其是假人自己建
+        # 的房（`_maybe_fill_with_bots` 会跳过假人触发以防循环补人），
+        # 不通知的话那间房永远只有它自己一个。
+        self._notify_lobby_created(lobby)
+
+    def _notify_lobby_created(self, lobby: Lobby) -> None:
+        """大厅建成 → 通知假人插件往这一间补位。
+
+        为什么不只靠 `_maybe_fill_with_bots`：那个钩子只在**真人**触发时
+        补位（假人自己建房会被跳过，怕循环补人）。可假人插件 3.10.0 起
+        把"自动 quick"改成了**事件驱动**——30 秒轮询心跳被移除，只剩
+        "上线事件 + 大厅创建事件"两个入口。缺了这个回调，新建的房间就
+        再也不会有别的假人进来。
+
+        不会递归：假人插件内部按 event_id 去重，补位时又指定了 lobby_id，
+        假人只往这一间进，塞不下就失败，绝不会各自另开新房。
+        """
+        try:
+            pm = getattr(self.server, "plugin_manager", None)
+            afp = pm.get_plugin("arc_fake_player") if pm else None
+            notify = getattr(afp, "api_shooter_lobby_created", None)
+            if not callable(notify):
+                return          # 旧版假人插件没这个接口
+            self._lobby_event_seq += 1
+            notify(lobby.lobby_id, f"{lobby.lobby_id}#{self._lobby_event_seq}")
+        except Exception as exc:
+            self._safe_log("debug", f"notify_lobby_created: {exc}")
 
     def _join_lobby(self, player: Player, lobby_id: str) -> None:
         if self._lobby_of(player.name) is not None:
@@ -2346,7 +2380,51 @@ class ARCShooterGamePlugin(Plugin):
                 b_name,
             )
             self._schedule_match_result_form(member, result_content)
+        # 赛后让假人说一句。枪战模式下它们**不主动说话**（需求文档 §1），
+        # 只有结算事件才会开口——这个事件必须由我们发。
+        self._notify_match_settlement(lobby, winner, score_a, score_b)
         self.lobbies.pop(lobby.lobby_id, None)
+
+    def _notify_match_settlement(self, lobby: Lobby, winner: Optional[str],
+                                  score_a: int, score_b: int) -> None:
+        """一局结束 → 告诉假人"打完了"，让它们在赛后说一句。
+
+        假人插件在枪战模式下不主动发言，只在被点名或收到**结算类**事件
+        时才开口。走的是 `api_environment_event(name, text, settlement=True)`
+        —— settlement 必须传 True：假人侧把普通现场闲聊在枪战模式下一律
+        拒收（`mode == "gun_game" and not settlement` 直接 return False），
+        不传这个开关，赛后就一声不吭。
+
+        假人插件自带 300 秒限频，一局打完不会刷屏；非假人玩家调过去
+        会返回 ok=False，无副作用。
+        """
+        try:
+            pm = getattr(self.server, "plugin_manager", None)
+            afp = pm.get_plugin("arc_fake_player") if pm else None
+            notify = getattr(afp, "api_environment_event", None)
+            if not callable(notify):
+                return
+            a_name = lobby.team_name(TEAM_A)
+            b_name = lobby.team_name(TEAM_B)
+            if winner is None:
+                text = f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，打平了。"
+            else:
+                text = (f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，"
+                        f"{lobby.team_name(winner)}赢了。")
+            for ps in lobby.result_rows():
+                name = ps.name
+                try:
+                    notify(name, text, True)
+                except TypeError:
+                    # 旧版假人插件的 api_environment_event 不认第三个参数
+                    try:
+                        notify(name, text)
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+        except Exception as exc:
+            self._safe_log("debug", f"notify_match_settlement: {exc}")
 
     def _send_match_result_toast(
         self,
