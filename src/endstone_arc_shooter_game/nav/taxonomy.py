@@ -50,7 +50,10 @@ BLOCKING_THIN = frozenset({"iron_bars"})
 #: 当空气会让路线穿过它把假人楔住（和铁栏同病）；它的后缀从
 #: "可穿装饰" 挪到这里，走廊/头空/切角全部按阻挡处理，顶面也不生成
 #: 站立点（消灭"站在活板门顶上"的幽灵节点）。
-_BLOCKING_SUFFIXES = ("_trapdoor",)
+# _bars 全族（2026-11-03 收官：实测 harbor 集装箱区 waxed_copper_bars
+# 又把假人挡住——iron/copper/gold/铁木铜各类栅栏条全是"有碰撞箱穿不过、
+# 顶面站不住"的同一物理，统一按后缀拦截）
+_BLOCKING_SUFFIXES = ("_trapdoor", "_bars")
 
 #: 地毯按颜色命名（white_carpet …），词表记不住 16 个，认后缀。
 #: 活板门同理（oak_trapdoor / spruce_trapdoor / …）：开着能穿、关着也
