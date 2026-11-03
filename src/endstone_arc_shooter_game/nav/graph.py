@@ -101,14 +101,17 @@ def build_graph(bmap: BlockMap,
                 dy = ny - y
                 if dy > MAX_UP or dy < -MAX_DOWN:
                     continue
-                # 下落净空：落差 ≥ 2 时，目标列 y'+2..y+1 必须全空
+                # 脚位可能带 .5（半砖/楼梯）——格子级检查一律用 floor 取整格
+                yi, nyi = int(y), int(ny)
+                # 下落净空：落差 ≥ 2 时，目标列落点上方至出发头顶必须全空
+                # （落点相邻格由可站立判定保证空气，走廊从 floor(ny)+2 起查）
                 if dy <= -2 and not all(
                         _air(bmap, nx, yy, nz)
-                        for yy in range(ny + 2, y + 2)):
+                        for yy in range(nyi + 2, yi + 2)):
                     continue
                 # 斜向防切角：两侧直行列在过渡窗口内不得有实体
                 if diagonal:
-                    lo, hi = min(y, ny), max(y, ny) + 1
+                    lo, hi = min(yi, nyi), max(yi, nyi) + 1
                     ok = True
                     for cx, cz in ((x + dx, z), (x, z + dz)):
                         if not all(_air(bmap, cx, yy, cz) for yy in range(lo, hi + 1)):

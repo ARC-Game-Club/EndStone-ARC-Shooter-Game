@@ -185,3 +185,44 @@ class AstarTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlabHeightTests(unittest.TestCase):
+    """半高度支撑（2026-11-03 枪战服卡点）：底半砖/正楼梯脚位 = Y+0.5。"""
+
+    def _map(self, columns, span=3):
+        return mkmap(columns, span)
+
+    def test_bottom_slab_foot_half(self):
+        m = self._map({(0, 0): {64: "brick_slab"}})
+        st = column_standables(m, 0, 0)
+        # col_states 没有状态时按 bottom（缺省）→ 脚位 64.5
+        self.assertEqual(st, [(64.5, "brick_slab")])
+
+    def test_top_slab_foot_full(self):
+        m = self._map({(0, 0): {64: "brick_slab"}})
+        m.col_states[(0, 0)] = {64: {"vertical_half": "top"}}
+        self.assertEqual(column_standables(m, 0, 0), [(65.0, "brick_slab")])
+
+    def test_double_slab_foot_full(self):
+        m = self._map({(0, 0): {64: "brick_double_slab"}})
+        self.assertEqual(column_standables(m, 0, 0), [(65.0, "brick_double_slab")])
+
+    def test_upright_stairs_half(self):
+        m = self._map({(0, 0): {64: "birch_stairs"}})
+        self.assertEqual(column_standables(m, 0, 0), [(64.5, "birch_stairs")])
+
+    def test_upside_down_stairs_full(self):
+        m = self._map({(0, 0): {64: "birch_stairs"}})
+        m.col_states[(0, 0)] = {64: {"upside_down_bit": True}}
+        self.assertEqual(column_standables(m, 0, 0), [(65.0, "birch_stairs")])
+
+    def test_slab_to_full_half_step_edge(self):
+        # 半砖(64.5) ↔ 整块(65.0)：dy=±0.5，双向都该连边
+        m = self._map({(0, 0): {64: "brick_slab"}, (1, 0): {64: "stone"}})
+        sts = all_standables(m)
+        g = build_graph(m, [p for p, _ in sts], [n for _, n in sts])
+        idx = g.node_index()
+        a, b = idx[(0, 64.5, 0)], idx[(1, 65.0, 0)]
+        self.assertIn(b, g.neighbors_of(a))
+        self.assertIn(a, g.neighbors_of(b))

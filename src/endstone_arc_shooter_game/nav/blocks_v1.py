@@ -44,6 +44,15 @@ class BlockMap:
     source_path: str
     #: (x, z) -> {y: name}
     columns: Dict[Tuple[int, int], Dict[int, str]] = field(default_factory=dict)
+    #: (x, z) -> {y: states}——只留半砖/楼梯的（它们的站立高度看状态）。
+    #: 其余方块的 states 加载时丢弃省内存（导航用不到）。
+    col_states: Dict[Tuple[int, int], Dict[int, Dict]] = field(default_factory=dict)
+
+    def states_at(self, x: int, y: int, z: int) -> Optional[dict]:
+        col = self.col_states.get((x, z))
+        if not col:
+            return None
+        return col.get(y)
 
     # ------------------------------------------------------------------
 
@@ -66,6 +75,15 @@ class BlockMap:
         return 100.0 * (self.total_columns - self.unloaded_columns) / self.total_columns
 
 
+#: 这些方块的**站立高度取决于方块状态**（半砖上下/楼梯倒正），
+#: 加载时保留它们的 states。
+_KEEP_STATES_SUFFIX = ("_slab", "_stairs")
+
+
+def _wants_states(short: str) -> bool:
+    return short.endswith(_KEEP_STATES_SUFFIX) or "double_slab" in short
+
+
 def load_map(path: str | Path) -> BlockMap:
     """读一个 blocks-v1 JSON 成 BlockMap。"""
     p = Path(path)
@@ -76,16 +94,27 @@ def load_map(path: str | Path) -> BlockMap:
     b = [float(v) for v in raw["bounds"]]
     x1, x2, y1, y2, z1, z2 = b
     columns: Dict[Tuple[int, int], Dict[int, str]] = {}
+    col_states: Dict[Tuple[int, int], Dict[int, Dict]] = {}
     for col in raw["columns"]:
         key = (int(col["x"]), int(col["z"]))
         cells: Dict[int, str] = {}
+        st: Dict[int, Dict] = {}
         for blk in col.get("blocks", ()):
             name = blk.get("name") or ""
             if not name:
                 continue
-            cells[int(blk["y"])] = name.split(":", 1)[-1] if ":" in name else name
+            short = name.split(":", 1)[-1] if ":" in name else name
+            y = int(blk["y"])
+            cells[y] = short
+            if _wants_states(short):
+                states = blk.get("states")
+                if isinstance(states, dict) and states:
+                    # 键可能带 minecraft: 前缀，统一剥掉
+                    st[y] = {str(k).split(":")[-1]: v for k, v in states.items()}
         if cells:
             columns[key] = cells
+            if st:
+                col_states[key] = st
     return BlockMap(
         map_id=str(raw.get("map_id", p.stem)),
         display_name=str(raw.get("display_name", "")),
@@ -99,6 +128,7 @@ def load_map(path: str | Path) -> BlockMap:
         exported_at=str(raw.get("exported_at", "")),
         source_path=str(p),
         columns=columns,
+        col_states=col_states,
     )
 
 

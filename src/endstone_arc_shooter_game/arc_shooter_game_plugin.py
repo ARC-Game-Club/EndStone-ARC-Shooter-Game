@@ -392,6 +392,10 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as e:
             self.nav = None
             self._safe_log("warning", f"[ARCShooterGame] nav service init failed: {e}")
+        # 战场常加载（服主 2026-11-03）：给每张图的 region 挂常加载区块。
+        # ⚠️ 不能在 on_load 里直接 dispatch——命令系统这时还没就绪
+        # （typeid nullptr 崩，2026-11-03 实测），延到 on_enable 的首个
+        # 调度 tick 再发。
         self._safe_log("info", "[ARCShooterGame] on_load")
 
     def on_enable(self) -> None:
@@ -421,6 +425,12 @@ class ARCShooterGamePlugin(Plugin):
             )
         except Exception as e:
             self._safe_log("error", f"[ARCShooterGame] Failed to register fast tick: {e}")
+        # 战场常加载：on_load 阶段命令系统没就绪，这里延 100 tick 再建
+        try:
+            self.server.scheduler.run_task(
+                self, self._nav_map_ticking_areas, delay=100)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] 战场常加载调度失败: {e}")
         self._register_arc_main_menu_button()
         self._safe_log("info", "[ARCShooterGame] enabled")
 
@@ -1226,6 +1236,37 @@ class ARCShooterGamePlugin(Plugin):
                         ", ".join(f"{a}→{b}" for a, b in res["unreachable"][:6])))
             elif not spawns:
                 sender.send_message(self._t("NAV_NO_SPAWNS"))
+
+    def _nav_map_ticking_areas(self) -> None:
+        """每张图的 region 挂常加载区块（重启后由这里重建，命令加的不持久）。
+
+        一张图尽量一个矩形（≤96×96 切块，配合 BDS 的 10 个区域上限：
+        harbor 1 + 炼狱小镇 4 + 假人自带 2 ≈ 7）。y 取 region 的一层薄带——
+        tickingarea 只认 xz 范围，y 给两端点即可。
+        """
+        if not self.config_store:
+            return
+        added = 0
+        for map_cfg in self.config_store.maps.values():
+            mid = str(map_cfg.get("id") or "")
+            bounds = region_bounds(map_cfg)
+            if not mid or bounds is None:
+                continue
+            x1, x2, _y1, _y2, z1, z2 = [int(v) for v in bounds]
+            safe = "".join(ch for ch in mid if ch.isascii() and ch.isalnum())[:16] or "map"
+            from endstone_arc_shooter_game.nav.exporter import split_tiles
+            # ≤98×98/块（6×6=36 区块，100 区块上限内；圆形上限 4 区块装不下
+            # 战场，用中心覆盖的矩形网格代替）。炼狱小镇 194×190 → 2×2=4 块。
+            for i, t in enumerate(split_tiles(x1, x2, z1, z2, 98)[:6]):
+                cmd = (f"tickingarea add {t['x1']} 64 {t['z1']} "
+                       f"{t['x2']} 64 {t['z2']} arena_{safe}_{i}")
+                try:
+                    self.server.dispatch_command(self.server.command_sender, cmd)
+                    added += 1
+                except Exception as e:
+                    self._safe_log("warning", f"战场常加载失败 [{cmd}]: {e}")
+        if added:
+            self._safe_log("info", f"[ARCShooterGame] 战场常加载已建立 {added} 块")
 
     def api_request_path(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
         """给其他插件（AI 假人）调用的烘焙导航寻路。

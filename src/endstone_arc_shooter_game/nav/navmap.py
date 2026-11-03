@@ -232,25 +232,26 @@ class NavService:
         """
         fx, fy, fz = float(pos[0]), float(pos[1]), float(pos[2])
         bx, bz = math.floor(fx), math.floor(fz)
-        foot = int(math.ceil(fy)) if fy != int(fy) else int(fy)
+        # 脚位可为 .5（半砖/楼梯顶）——直接按浮点精确匹配
+        foot = float(fy)
         exact = nav.index.get((bx, foot, bz))
+        if exact is None and fy != int(fy):
+            # 位置略偏（跳跃中/微浮空）→ 试整格与半格两个候选
+            for cand in (float(math.floor(fy)) + 0.5, float(math.floor(fy))):
+                exact = nav.index.get((bx, cand, bz))
+                if exact is not None:
+                    break
         if exact is not None:
             return exact
         best = None
         best_key = None
-        for ddx in range(-2, 3):
-            for ddz in range(-2, 3):
-                d = max(abs(ddx), abs(ddz))
-                idxs = nav.by_col.get((bx + ddx, bz + ddz))
-                if not idxs:
-                    continue
-                for i in idxs:
-                    # 高度差优先：同高度层里再挑最近的列
-                    key = (abs(nav.nodes[i][1] - foot), d)
-                    if best_key is None or key < best_key:
-                        best_key = key
-                        best = i
-        return best
+        # 半径 2 找不到（站在掩体/薄片结构旁很常见）→ 扩到 5：
+        # 拿不到起点节点 = 永远要不到路径 = 假人罚站（2026-11-03 实测）
+        for radius in (2, 5):
+            hit = _snap_near(nav, bx, bz, foot, radius)
+            if hit is not None:
+                return hit
+        return None
 
     def query(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
         """A* 查询。map_id 为 None 时不定位（调用方自己解析好再传）。
@@ -349,3 +350,23 @@ class NavService:
         except Exception as exc:
             return {"ok": False, "text": f"spawn_check: {exc}", "detail": [],
                     "matrix": {}, "oneway": [], "unreachable": []}
+
+
+def _snap_near(nav: "_LoadedNav", bx: int, bz: int, foot: float,
+               radius: int) -> Optional[int]:
+    """bx/bz 附近 radius 格内找高度差最小、列最近的节点。"""
+    best = None
+    best_key = None
+    for ddx in range(-radius, radius + 1):
+        for ddz in range(-radius, radius + 1):
+            d = max(abs(ddx), abs(ddz))
+            idxs = nav.by_col.get((bx + ddx, bz + ddz))
+            if not idxs:
+                continue
+            for i in idxs:
+                # 高度差优先：同高度层里再挑最近的列
+                key = (abs(nav.nodes[i][1] - foot), d)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best = i
+    return best
