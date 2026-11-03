@@ -1,0 +1,124 @@
+# 枪战服 latest.log 导航相关摘录
+
+总行数: 9657
+
+- 导航路径已下发: 747
+- 导航请求无路径: 293
+- arena 卡死: 1545
+- 本段已走: 1216
+- 侧移: 1545
+- 视野内可打: 1190
+- 射击/开火: 35
+- 导航路径已下发(英文): 0
+- bot:nav: 3324
+- Script event: 4065
+- 假人加入: 47
+- 卡死脱困: 0
+
+## 导航路径已下发（前 30 条）
+[15:46:33] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：42 个点（起点 [-1013, 64, 997] → 终点 [-977, 64, 999]）
+[15:46:35] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：46 个点（起点 [-977, 64, 999] → 终点 [-1017, 64, 1018]）
+[15:46:39] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：30 个点（起点 [-1006, 64, 1014] → 终点 [-978, 64, 1004]）
+[15:46:41] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：26 个点（起点 [-978, 64, 1002] → 终点 [-1000, 64, 1013]）
+[15:46:45] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：17 个点（起点 [-998, 65, 1011] → 终点 [-989, 64, 1010]）
+[15:46:47] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:46:50] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:46:54] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:46:56] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:46:59] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:01] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:04] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:06] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:10] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:11] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：40 个点（起点 [-1020, 64, 1004] → 终点 [-989, 64, 1010]）
+[15:47:11] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:16] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:17] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：32 个点（起点 [-1010, 64, 1008] → 终点 [-989, 64, 1010]）
+[15:47:18] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:21] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:23] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：30 个点（起点 [-1010, 64, 1010] → 终点 [-989, 64, 1010]）
+[15:47:24] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:27] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:28] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：30 个点（起点 [-1010, 64, 1010] → 终点 [-989, 64, 1010]）
+[15:47:30] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:33] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：30 个点（起点 [-1010, 64, 1010] → 终点 [-989, 64, 1010]）
+[15:47:34] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:35] [Server/INFO]: [ArcFakePlayer] [BloodShot] 导航路径已下发：18 个点（起点 [-998, 65, 1010] → 终点 [-989, 64, 1010]）
+[15:47:39] [Server/INFO]: [ArcFakePlayer] [zhaohuazi] 导航路径已下发：18 个点（起点 [-989, 64, 1010] → 终点 [-998, 65, 1010]）
+[15:47:39] [Server/INFO]: [ArcFakePlayer] [v0lv3r] 导航路径已下发：30 个点（起点 [-1010, 64, 1010] → 终点 [-989, 64, 1010]）
+
+## arena 卡死（前 30 条）
+[15:46:34] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-1019.48,64.00,1020.62)，脚/身/头=minecraft:basalt/minecraft:air/minecraft:air，朝敌8格=minecraft:smooth_stone 朝敌16格=minecraft:basalt 朝敌26格=minecraft:deepslate，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:46:38] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-977.70,64.06,1001.80)，脚/身/头=minecraft:waxed_copper/minecraft:brown_carpet/minecraft:air，朝敌8格=minecraft:cobbled_deepslate 朝敌16格=minecraft:cobbled_deepslate 朝敌26格=minecraft:stone_brick_stairs，侧移 2 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:46:39] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-1005.50,64.00,1014.30)，脚/身/头=minecraft:deepslate/minecraft:air/minecraft:air，朝敌8格=minecraft:cobbled_deepslate 朝敌16格=minecraft:cobbled_deepslate 朝敌26格=minecraft:basalt，侧移 1 次成功，搜索 26格(0/2) 25格(0/2) 24格(0/3) 23格(1/1) 无地面0 高差超标0 走不通9
+[15:46:43] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,64.00,1010.70)，脚/身/头=minecraft:cobbled_deepslate/minecraft:air/minecraft:air，朝敌8格=minecraft:cobbled_deepslate 朝敌16格=minecraft:stone_brick_stairs 朝敌26格=minecraft:deepslate，侧移 2 次成功，搜索 12格(1/7) 无地面0 高差超标0 走不通0
+[15:46:44] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1011.37)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:46:47] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.82)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/13) 无地面0 高差超标0 走不通0
+[15:46:47] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.84)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(1/3) 无地面0 高差超标0 走不通0
+[15:46:51] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/11) 无地面0 高差超标0 走不通0
+[15:46:51] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:46:55] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/2) 无地面0 高差超标0 走不通1
+[15:46:55] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(0/16) 11格(1/7) 无地面0 高差超标2 走不通0
+[15:46:59] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/12) 无地面0 高差超标0 走不通1
+[15:46:59] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:47:02] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/8) 无地面0 高差超标0 走不通1
+[15:47:02] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(1/7) 无地面0 高差超标1 走不通0
+[15:47:06] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/13) 无地面0 高差超标0 走不通1
+[15:47:06] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:47:10] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/1) 无地面0 高差超标0 走不通0
+[15:47:10] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(1/1) 无地面0 高差超标0 走不通0
+[15:47:14] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/9) 无地面0 高差超标0 走不通0
+[15:47:14] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:47:14] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 v0lv3r：判为 stalled，自身(-1009.30,64.00,1009.02)，脚/身/头=minecraft:cobbled_deepslate/minecraft:air/minecraft:air，朝敌8格=arc:container_red 朝敌16格=minecraft:deepslate 朝敌26格=minecraft:cobbled_deepslate，侧移 2 次成功，搜索 19格(0/4) 18格(0/8) 17格(0/13) 16格(0/13) 15格(0/13) 14格(1/5) 无地面0 高差超标0 走不通61
+[15:47:17] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/8) 无地面0 高差超标0 走不通1
+[15:47:17] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(1/4) 无地面0 高差超标0 走不通0
+[15:47:18] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 v0lv3r：判为 stalled，自身(-1009.30,64.00,1010.14)，脚/身/头=minecraft:cobbled_deepslate/minecraft:air/minecraft:air，朝敌8格=minecraft:cobbled_deepslate 朝敌16格=minecraft:deepslate 朝敌26格=minecraft:cobbled_deepslate，侧移 2 次成功，搜索 19格(0/13) 18格(0/13) 17格(0/13) 16格(0/13) 15格(0/13) 14格(0/13) 13格(1/9) 无地面0 高差超标1 走不通94
+[15:47:21] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/13) 无地面0 高差超标0 走不通0
+[15:47:21] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 无 无地面? 高差超标? 走不通?
+[15:47:22] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 v0lv3r：判为 stalled，自身(-1009.30,64.00,1010.57)，脚/身/头=minecraft:cobbled_deepslate/minecraft:air/minecraft:air，朝敌8格=minecraft:cobbled_deepslate 朝敌16格=minecraft:deepslate 朝敌26格=minecraft:cobbled_deepslate，侧移 2 次成功，搜索 19格(0/13) 18格(0/13) 17格(0/13) 16格(1/8) 无地面0 高差超标0 走不通50
+[15:47:25] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 zhaohuazi：判为 stalled，自身(-988.70,65.00,1010.83)，脚/身/头=minecraft:air/minecraft:air/minecraft:wall_banner，朝敌8格=arc:container_red 朝敌16格=minecraft:red_wool 朝敌26格=arc:hesco_snow，侧移 2 次成功，搜索 12格(1/10) 无地面0 高差超标0 走不通0
+[15:47:25] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 卡死 BloodShot：判为 stalled，自身(-997.30,65.00,1010.83)，脚/身/头=arc:sandbag/minecraft:air/minecraft:air，朝敌8格=arc:container_blue 朝敌16格=minecraft:air 朝敌26格=minecraft:iron_block，侧移 1 次成功，搜索 12格(0/16) 11格(0/16) 10格(1/5) 无地面0 高差超标5 走不通0
+
+## 本段已走（前 20 条）
+[15:45:02] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (-1,55,-9) 剩 9.1 格，自身(0.0,53.0,0.0)，本段已走 ? 格
+[15:45:11] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (1,56,-9) 剩 8.6 格，自身(-6.7,59.8,-11.5)，本段已走 15.0 格
+[15:45:23] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (6,62,-8) 剩 14.5 格，自身(-7.3,59.0,-11.5)，本段已走 0.9 格
+[15:45:27] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (-8,62,3) 剩 15.9 格，自身(4.4,62.0,-7.5)，本段已走 12.7 格
+[15:45:32] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (-12,60,4) 剩 6.3 格，自身(-7.2,62.0,1.1)，本段已走 14.4 格
+[15:45:46] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (-2,56,-10) 剩 18.3 格，自身(-11.1,60.5,5.3)，本段已走 5.9 格
+[15:45:58] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (-14,58,0) 剩 6.3 格，自身(-11.1,60.5,5.3)，本段已走 0.0 格
+[15:46:04] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 zhaohuazi：目标点 (-9,59,-12) 剩 16.1 格，自身(0.0,53.0,0.0)，本段已走 ? 格
+[15:46:07] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 大厅闲逛 BloodShot：目标点 (3,59,-15) 剩 15.2 格，自身(-10.6,59.0,-8.6)，本段已走 13.9 格
+[15:46:33] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-1019.5,64.0,1020.6)，敌人 1 个，最近 zhaohuazi 47.9 格，目标点 (-1021,64,991) 剩 29.6 格，本段已走 ? 格，视野内可打 无（原因未知）
+[15:46:35] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 zhaohuazi：房间 playing，自身(-976.5,64.1,999.5)，敌人 1 个，最近 BloodShot 44.3 格，目标点 (-985,64,997) 剩 8.8 格，本段已走 ? 格，视野内可打 无（原因未知）
+[15:46:38] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-1006.1,64.5,1014.5)，敌人 1 个，最近 zhaohuazi 31.0 格，目标点 (-1004,64,1015) 剩 2.7 格，本段已走 14.7 格，视野内可打 无（zhaohuazi 超出射程 31）
+[15:46:40] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 zhaohuazi：房间 playing，自身(-979.8,64.0,1006.2)，敌人 1 个，最近 BloodShot 24.1 格，目标点 (-980,64,1020) 剩 13.8 格，本段已走 7.6 格，视野内可打 无（BloodShot 被 minecraft:blue_wool 挡住）
+[15:46:43] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-997.3,65.0,1012.1)，敌人 1 个，最近 zhaohuazi 8.8 格，目标点 (-1006,64,1015) 剩 8.6 格，本段已走 9.2 格，视野内可打 无（zhaohuazi 被 arc:container_red 挡住）
+[15:46:45] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 zhaohuazi：房间 playing，自身(-988.7,65.8,1010.7)，敌人 1 个，最近 BloodShot 8.6 格，目标点 (-989,65,1014) 剩 2.9 格，本段已走 10.1 格，视野内可打 无（BloodShot 被 arc:container_blue 挡住）
+[15:46:48] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-997.3,65.0,1010.8)，敌人 1 个，最近 zhaohuazi 8.6 格，目标点 (-998,64,1014) 剩 2.9 格，本段已走 1.2 格，视野内可打 无（zhaohuazi 被 arc:container_red 挡住）
+[15:46:50] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 zhaohuazi：房间 playing，自身(-988.7,65.0,1010.8)，敌人 1 个，最近 BloodShot 8.6 格，目标点 (-989,65,1014) 剩 2.7 格，本段已走 0.8 格，视野内可打 无（BloodShot 被 minecraft:lapis_block 挡住）
+[15:46:53] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-997.3,65.0,1010.8)，敌人 1 个，最近 zhaohuazi 8.6 格，目标点 (-998,64,1014) 剩 2.9 格，本段已走 0.0 格，视野内可打 无（zhaohuazi 被 arc:container_red 挡住）
+[15:46:55] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 zhaohuazi：房间 playing，自身(-988.7,65.0,1010.8)，敌人 1 个，最近 BloodShot 8.6 格，目标点 (-989,65,1014) 剩 2.7 格，本段已走 0.0 格，视野内可打 无（BloodShot 被 minecraft:lapis_block 挡住）
+[15:46:58] [Server/INFO]: [Scripting] [ArcFakePlayer] arena 状态 BloodShot：房间 playing，自身(-997.3,65.0,1010.8)，敌人 1 个，最近 zhaohuazi 8.6 格，目标点 (-998,64,1014) 剩 2.9 格，本段已走 0.0 格，视野内可打 无（zhaohuazi 被 arc:container_red 挡住）
+
+## 导航请求无路径（前 20 条）
+[15:47:04] [Server/WARNING]: [ArcFakePlayer] [v0lv3r] 导航请求无路径 → (-988.7000122070312, 65.0, 1010.8320922851562)：api_request_path: 起点 (0,53,0) 不在任何已导出的地图里（维度 overworld）
+[15:48:21] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-997.2999877929688, 65.0, 1010.8328857421875)：api_request_path: 起点 (0,53,0) 不在任何已导出的地图里（维度 overworld）
+[15:49:21] [Server/WARNING]: [ArcFakePlayer] [QAZwsx] 导航请求无路径 → (-995.7000122070312, 64.0, 1003.7000122070312)：api_request_path: 起点 (0,53,0) 不在任何已导出的地图里（维度 overworld）
+[15:51:30] [Server/WARNING]: [ArcFakePlayer] [v0lv3r] 导航请求无路径 → (0.0, 53.0, 0.0)：api_request_path: 起点 (0,53,0) 不在任何已导出的地图里（维度 overworld）
+[15:51:31] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (0.1077907606959343, 53.0, 0.40240663290023804)：api_request_path: 起点 (0,53,0) 不在任何已导出的地图里（维度 overworld）
+[15:52:31] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:34] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1001, 64, 987) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:36] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:39] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:42] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:45] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:47] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:50] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:52] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:55] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:52:59] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:53:02] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:53:04] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:53:07] [Server/WARNING]: [ArcFakePlayer] [d3ath99] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-1006, 64, 983) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
+[15:53:10] [Server/WARNING]: [ArcFakePlayer] [zhaohuazi] 导航请求无路径 → (-1005.300048828125, 64.0, 979.1375122070312)：api_request_path: (-993, 64, 979) → (-1006, 68, 979) 不可达（分量断开或只有单向跳崖边）
