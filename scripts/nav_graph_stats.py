@@ -31,14 +31,14 @@ from endstone_arc_shooter_game.nav.taxonomy import (  # noqa: E402
     LIQUIDS, PASSABLE_DECOR, short_name,
 )
 
-#: 上游 `_PASSABLE_DECOR_SUFFIXES`——注意里面有 "_carpet"，
-#: 所以 16 种颜色变体即使不在词表里也按空气处理。
-_PASSABLE_SUFFIXES = ("_carpet", "_tulip", "_sapling")
+#: 与上游 `_PASSABLE_DECOR_SUFFIXES` 保持一致（2026-11-03 起含 "_trapdoor"）。
+#: ⚠ 改上游后缀表时这里要跟着改，否则体检数字和真实烘焙对不上。
+_PASSABLE_SUFFIXES = ("_carpet", "_tulip", "_sapling", "_trapdoor")
 
 #: 薄片/栅栏类：游戏里**能穿过去**，但**站不住**。
-#: 上游词表默认从严（未知方块当实心），这些没被列进去 →
-#: 导航图里多出"站在铁栏顶上"的幽灵节点（实测 22 个，脚高 y=68），
-#: 而且真实能走的格子被判成墙。
+#: iron_bars / *_trapdoor 已于 2026-11-03 收进上游词表（留在这里无害，
+#: 仅作重叠提示）；ladder/vine/glow_lichen/scaffolding 还是"从严当实心"，
+#: 改上游前可先用 --thin-as-air 看效果。
 THIN_BLOCKS = ("iron_bars", "trapdoor", "ladder", "vine", "glow_lichen",
                "scaffolding", "cobweb")
 

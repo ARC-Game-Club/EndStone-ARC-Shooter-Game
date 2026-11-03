@@ -35,11 +35,17 @@ PASSABLE_DECOR = frozenset({
     "structure_void", "air", "cave_air", "void_air",
     # 薄层
     "snow_layer", "carpet",  # 地毯有 16 色变体，见 _normalize 里的前缀处理
+    # 薄片栅栏（2026-11-03 枪战服实测）：游戏里**能穿但站不住**——判成
+    # 实心会造出"站在铁栏顶上"的幽灵节点（harbor 22 个、脚高全 y=68，
+    # 把假人吸附点抬到半空），还会把真实能走的路当墙判死。
+    "iron_bars",
     "cobweb",
 })
 
 #: 地毯按颜色命名（white_carpet …），词表记不住 16 个，认后缀。
-_PASSABLE_DECOR_SUFFIXES = ("_carpet", "_tulip", "_sapling")
+#: 活板门同理（oak_trapdoor / spruce_trapdoor / …）：开着能穿、关着也
+#: 站不住（0.2 厚），统一当空气——烘焙不看开合状态，从严宁可多放行。
+_PASSABLE_DECOR_SUFFIXES = ("_carpet", "_tulip", "_sapling", "_trapdoor")
 
 #: 到这里都还没认出来的方块 → 一律当**实心支撑**（默认从严：能站）。
 #: 宁可多建一个点让可视化里看出来，也不要漏掉真实地形。
