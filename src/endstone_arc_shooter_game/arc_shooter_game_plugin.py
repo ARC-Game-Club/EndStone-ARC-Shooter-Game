@@ -43,6 +43,7 @@ from endstone_arc_shooter_game.config import (
     has_region,
     nearest_spawn_index,
     normalize_team_arg,
+    region_bounds,
     map_incomplete_reasons,
     mode_incomplete_reasons,
     mode_playable,
@@ -825,9 +826,91 @@ class ARCShooterGamePlugin(Plugin):
                 "enemies": enemies,
                 "match_seconds": int(lobby.match_time_seconds or 300),
                 "lobby_id": lobby.lobby_id,
+                # 地图标识：假人插件用它给"可达点缓存"分桶。
+                # 不同地图的坐标区间可能重叠，混用会拿 A 图的"这格能走"
+                # 去指导 B 图，把假人导进墙里（2026-11-02）。
+                "map_id": str(lobby.map_id or ""),
+                "map_name": lobby.display_name,
+                "mode": lobby.active_mode,
+                # 地图边界 [x1,x2,y1,y2,z1,z2]：假人插件拿它做"地图烘焙"
+                # （把整张图能站且能走到的地方预先扫成一张表）。
+                # 没有 region 的地图返回 None，烘焙会跳过。
+                "bounds": list(region_bounds(lobby.map_cfg))
+                if lobby.map_cfg and region_bounds(lobby.map_cfg) else None,
             }
         except Exception as exc:
             return {"ok": False, "text": f"api_lobby_info: {exc}"}
+
+    def api_map_list(self) -> Dict[str, Any]:
+        """所有**可玩**地图的 id / 名字 / 边界（给假人插件做地图烘焙用）。
+
+        为什么要暴露：烘焙是"进哪张图就烘哪张"，要主动把**所有图**都烘
+        一遍，假人插件得先知道有哪些图、各自的 region 在哪
+        （2026-11-03 服主："应该是自动烘焙所有图"）。
+        """
+        try:
+            out: List[Dict[str, Any]] = []
+            for map_cfg in self._playable_maps():
+                bounds = region_bounds(map_cfg)
+                modes = playable_modes(map_cfg)
+                out.append({
+                    "id": str(map_cfg.get("id") or ""),
+                    "name": str(map_cfg.get("display_name")
+                                or map_cfg.get("id") or ""),
+                    "bounds": list(bounds) if bounds else None,
+                    "mode": modes[0] if modes else "",
+                })
+            return {"ok": True, "maps": out}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_map_list: {exc}"}
+
+    def api_create_lobby_for_map(self, player: Any, map_id: str) -> Dict[str, Any]:
+        """用**指定地图**建一间房并让该玩家加入（地图烘焙专用）。
+
+        和 `_create_lobby` 的区别只有一处：不随机选图，直接指定。
+        这样假人插件可以把 8 个假人**分散到不同地图**，一次命令就把所有
+        图都烘出来，不用等随机轮换。
+        """
+        try:
+            name = getattr(player, "name", None)
+            if not name:
+                return {"ok": False, "text": "没有玩家名"}
+            if self._lobby_of(name) is not None:
+                return {"ok": False, "text": "已经在房间里"}
+            target = None
+            for map_cfg in self._playable_maps():
+                if str(map_cfg.get("id") or "") == str(map_id or ""):
+                    target = map_cfg
+                    break
+            if target is None:
+                return {"ok": False, "text": f"地图不存在或不可玩: {map_id}"}
+            if not self._can_create_lobby():
+                return {"ok": False, "text": "房间数已达上限"}
+            modes = playable_modes(target)
+            if not modes:
+                return {"ok": False, "text": f"地图没有可玩模式: {map_id}"}
+            lobby = Lobby(admin=name)
+            ok, reason = lobby.set_map_and_mode(target, modes[0])
+            if not ok:
+                return {"ok": False, "text": f"选图失败: {reason}"}
+            self.lobbies[lobby.lobby_id] = lobby
+            joined, why = lobby.join(
+                name,
+                self.config_store.starting_points() if self.config_store else 1000)
+            if not joined:
+                self.lobbies.pop(lobby.lobby_id, None)
+                return {"ok": False, "text": f"加入失败: {why}"}
+            self.player_to_lobby[name] = lobby.lobby_id
+            try:
+                self._apply_team_name_tag(player, lobby)
+            except Exception:
+                pass
+            self._maybe_fill_with_bots(lobby, trigger=player)
+            self._notify_lobby_created(lobby)
+            return {"ok": True, "lobby_id": lobby.lobby_id,
+                    "map_id": str(target.get("id") or "")}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_create_lobby_for_map: {exc}"}
 
     def api_lobby_status(self) -> Dict[str, Any]:
         """枪战房间现状（给假人插件的主循环判断用）。
