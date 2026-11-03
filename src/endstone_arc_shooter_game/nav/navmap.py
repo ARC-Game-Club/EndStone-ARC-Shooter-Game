@@ -221,7 +221,15 @@ class NavService:
             raise
 
     def snap(self, nav: _LoadedNav, pos) -> Optional[int]:
-        """坐标 → 站立点下标。本列精确脚位 → 本列最近脚位 → 邻近列（r≤2）。"""
+        """坐标 → 站立点下标。本列精确脚位 → 邻近列（**高度优先**，再比水平距离）。
+
+        ⚠️ 排序键必须是 **(高度差, 水平距离)**，不能反过来（2026-11-03）：
+        原来按 (水平距离, 高度差) 排，于是"同列但高 4 格"的节点会赢过
+        "隔壁列、同高度"的节点——假人被吸附到 4 格高的铁栏顶上，
+        路径第一步就变成"向上 4 格"，引擎寻路走不到 → 原地罚站
+        （日志：`arena 卡死 … 本段已走 0.0 格`）。
+        物理上假人只能在**当前高度层**活动，高度差必须优先。
+        """
         fx, fy, fz = float(pos[0]), float(pos[1]), float(pos[2])
         bx, bz = math.floor(fx), math.floor(fz)
         foot = int(math.ceil(fy)) if fy != int(fy) else int(fy)
@@ -237,7 +245,8 @@ class NavService:
                 if not idxs:
                     continue
                 for i in idxs:
-                    key = (d, abs(nav.nodes[i][1] - foot))
+                    # 高度差优先：同高度层里再挑最近的列
+                    key = (abs(nav.nodes[i][1] - foot), d)
                     if best_key is None or key < best_key:
                         best_key = key
                         best = i
