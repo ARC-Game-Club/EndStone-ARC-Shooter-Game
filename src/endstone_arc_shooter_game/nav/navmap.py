@@ -253,6 +253,20 @@ class NavService:
                 return hit
         return None
 
+    def nearest_node(self, nav: "_LoadedNav", pos):
+        """全图找离 pos 最近的节点（高度差优先）。吸附半径兜底用。"""
+        fx, fy, fz = float(pos[0]), float(pos[1]), float(pos[2])
+        bx, bz = math.floor(fx), math.floor(fz)
+        hit = _snap_near(nav, bx, bz, float(fy), 8)
+        if hit is not None:
+            return hit
+        best, best_key = None, None
+        for i, (x, y, z) in enumerate(nav.nodes):
+            key = (abs(y - fy), max(abs(x - bx), abs(z - bz)))
+            if best_key is None or key < best_key:
+                best_key, best = key, i
+        return best
+
     def query(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
         """A* 查询。map_id 为 None 时不定位（调用方自己解析好再传）。
 
@@ -265,7 +279,14 @@ class NavService:
             s = self.snap(nav, start)
             t = self.snap(nav, goal)
             if s is None:
-                return {"ok": False, "text": f"api_request_path: 起点 {start} 附近无站立点", "path": []}
+                # 吸附失效（站位刁钻/薄片包围）：给最近可用节点让调用方
+                # 把假人传送过去再要路径（2026-11-03 服主："吸附失效就
+                # 传送到最近的可用起点"）
+                near = self.nearest_node(nav, start)
+                if near is None:
+                    return {"ok": False, "text": "api_request_path: 图内无节点", "path": []}
+                return {"ok": False, "text": "start_snap_failed",
+                        "snap_to": list(nav.nodes[near]), "path": []}
             if t is None:
                 return {"ok": False, "text": f"api_request_path: 终点 {goal} 附近无站立点", "path": []}
             path = astar(nav, s, t)

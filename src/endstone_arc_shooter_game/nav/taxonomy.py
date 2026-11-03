@@ -107,6 +107,14 @@ def support_top_offset(name: str, states: dict | None = None) -> float:
     if n.endswith("_stairs"):
         # 倒楼梯贴在天花板上，站上去是整格；正楼梯低半边是 0.5
         return 1.0 if (states or {}).get("upside_down_bit") else 0.5
+    if (n.endswith("_wall") or n.endswith("_fence") or n == "fence_gate"
+            or n.endswith("_fence_gate")):
+        # 墙/栅栏族碰撞高 1.5 格（2026-11-03 服主目击"对着 1.5 格高的
+        # 墙卡住"）：顶面在 y+1.5。按整块建模会把墙顶节点放到 y+1.0，
+        # "上 1"边全部指向跳不上（跳跃 1.25）的位置。1.5 顶面意味着：
+        # 平地（+0）跳不上（dy=1.5 超限不出边），从半砖/楼梯（+0.5）
+        # 起跳 +1.0 才连得上——正好是真实物理。
+        return 1.5
     return 1.0
 
 
