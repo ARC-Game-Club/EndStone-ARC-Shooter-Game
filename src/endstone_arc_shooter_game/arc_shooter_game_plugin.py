@@ -48,6 +48,7 @@ from endstone_arc_shooter_game.config import (
     mode_playable,
     playable_modes,
     point_in_region,
+    region_bounds,
     calc_match_money,
     collect_assist_and_tk,
     match_performance_score,
@@ -71,7 +72,15 @@ from endstone_arc_shooter_game.inventory import (
     snapshot_player,
 )
 from endstone_arc_shooter_game.language import LanguageManager
+from endstone_arc_shooter_game.nav.exporter import TickingAreaMapExporter
+from endstone_arc_shooter_game.nav.navmap import NavService
 from endstone_arc_shooter_game import qq_report
+
+
+def _nav_data_dir(plugin: "ARCShooterGamePlugin"):
+    """导航数据目录：优先插件数据目录，缺退到固定相对路径。"""
+    from pathlib import Path
+    return Path(getattr(plugin, "data_folder", None) or "plugins/ARCShooterGame")
 from endstone_arc_shooter_game.loadout import (
     ACQUIRE_ARMORY,
     REASON_ALREADY_OWNED,
@@ -223,6 +232,8 @@ class ARCShooterGamePlugin(Plugin):
                 "/gs reload",
                 "/gs range",
                 "/gs armory",
+                "/gs bake",
+                "/gs nav",
             ],
             "permissions": ["arc_shooter_game.command.gs"],
         },
@@ -294,6 +305,13 @@ class ARCShooterGamePlugin(Plugin):
         self.range_players: Dict[str, float] = {}
         self._tick_task = None
         self._fast_tick_task = None
+        # 导航网格子系统（nav/）：烘焙好的寻路网格 + tickingarea 地图导出
+        self.nav: Optional[NavService] = None
+        self._nav_exporter: Optional[TickingAreaMapExporter] = None
+        self._nav_export_task = None
+        # 导出/烘焙进度要播报给谁（表单按钮触发时记录玩家名）
+        self._nav_notify: List[str] = []
+        self._nav_export_started: float = 0.0
 
     def _safe_log(self, level: str, message: str) -> None:
         if hasattr(self, "logger") and self.logger is not None:
@@ -359,6 +377,19 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as e:
             self.loadout_store = None
             self._safe_log("error", f"[ARCShooterGame] loadout store init failed: {e}")
+        # 导航网格：内置基线铺到数据目录（不覆盖服务器已有的）
+        try:
+            from pathlib import Path as _P
+            bundled = _P(__file__).resolve().parent / "nav" / "maps"
+            data_dir = _P(getattr(self, "data_folder", "plugins/ARCShooterGame"))
+            self.nav = NavService(data_dir, getattr(self, "logger", None),
+                                  bundled_dir=bundled)
+            n = self.nav.install_bundled()
+            if n:
+                self._safe_log("info", f"[ARCShooterGame] 导航基线装填 {n} 张")
+        except Exception as e:
+            self.nav = None
+            self._safe_log("warning", f"[ARCShooterGame] nav service init failed: {e}")
         self._safe_log("info", "[ARCShooterGame] on_load")
 
     def on_enable(self) -> None:
@@ -410,6 +441,12 @@ class ARCShooterGamePlugin(Plugin):
             self._safe_log("warning", f"[ARCShooterGame] Failed to register ARC main menu button: {e}")
 
     def on_disable(self) -> None:
+        # 导出中关插件：撤掉 tickingarea 再取消任务，别留常加载区域
+        if self._nav_exporter is not None:
+            try:
+                self._nav_exporter.cancel(remove_area=True)
+            except Exception:
+                pass
         try:
             core = self.server.plugin_manager.get_plugin("arc_core")
             if core is not None and hasattr(core, "api_unregister_main_menu_button"):
@@ -601,6 +638,21 @@ class ARCShooterGamePlugin(Plugin):
                 sender.send_message(self._t("RELOAD_OK"))
             except Exception as e:
                 sender.send_message(self._t("RELOAD_FAIL").format(e))
+            return True
+        if sub == "bake":
+            # /gs bake [map_id]：导出地图地形（tickingarea 加载）并烘焙导航网格。
+            # 控制台也能用；玩家不带 map_id 会弹选图表单。
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return True
+            self._handle_nav_bake(sender, args[1] if len(args) > 1 else "")
+            return True
+        if sub == "nav":
+            # /gs nav [map_id]：导航报告（烘焙状态 + 出生点连通性）
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return True
+            self._handle_nav_report(sender, args[1] if len(args) > 1 else "")
             return True
         if not isinstance(sender, Player):
             resolved = self._resolve_player_for_command_sender(sender)
@@ -895,6 +947,257 @@ class ARCShooterGamePlugin(Plugin):
                 fill(free)          # 老版本假人插件只认一个参数
         except Exception as exc:
             self._safe_log("debug", f"fill_with_bots: {exc}")
+
+    # ==================================================================
+    # 导航网格：命令 / 表单 / API（nav/ 子系统）
+    # ==================================================================
+
+    def _handle_nav_bake(self, sender: CommandSender, map_id: str) -> None:
+        if not map_id:
+            if isinstance(sender, Player):
+                self._show_nav_bake_form(sender)
+            else:
+                ids = ", ".join(self._nav_map_ids()) or "（无带区域的地图）"
+                sender.send_message(self._t("NAV_USAGE_CONSOLE").format(ids))
+            return
+        if map_id not in (self.config_store.maps if self.config_store else {}):
+            sender.send_message(self._t("NAV_MAP_NOT_FOUND").format(map_id))
+            return
+        self._nav_start_export(map_id, [str(getattr(sender, "name", "") or "")])
+
+    def _nav_map_ids(self) -> List[str]:
+        if not self.config_store:
+            return []
+        return [m.get("id") for m in self.config_store.maps.values()
+                if m.get("id") and has_region(m)]
+
+    def _show_nav_bake_form(self, player: Player) -> None:
+        if not self._is_op(player):
+            player.send_message(self._t("CMD_NO_PERMISSION"))
+            return
+        form = ActionForm(title=self._t("NAV_BAKE_TITLE"),
+                          content=self._t("NAV_BAKE_BODY"))
+        for mid in self._nav_map_ids():
+            cfg = (self.config_store.maps or {}).get(mid, {})
+            label = self._t("NAV_BAKE_MAP_BTN").format(
+                cfg.get("display_name") or mid, mid)
+            form.add_button(label, on_click=lambda sender, m=mid: self._nav_start_export(
+                m, [str(getattr(sender, "name", "") or "")]))
+        form.add_button(self._t("BACK"),
+                        on_click=lambda sender: self._show_config_maps(sender))
+        self._send_form(player, form)
+
+    def _nav_start_export(self, map_id: str, notify: List[str]) -> None:
+        assert self.config_store is not None
+        map_cfg = self.config_store.maps.get(map_id)
+        if map_cfg is None:
+            self._nav_say(notify, self._t("NAV_MAP_NOT_FOUND").format(map_id))
+            return
+        bounds = region_bounds(map_cfg)
+        if bounds is None:
+            self._nav_say(notify, self._t("NAV_NO_REGION").format(map_id))
+            return
+        if self._map_in_use(map_id):
+            self._nav_say(notify, self._t("NAV_MAP_BUSY").format(map_id))
+            return
+        dim = self._nav_dimension(str(map_cfg.get("dimension") or "overworld"))
+        if dim is None:
+            self._nav_say(notify, self._t("NAV_NO_DIMENSION").format(map_id))
+            return
+        if self._nav_exporter is None:
+            self._nav_exporter = TickingAreaMapExporter(
+                self, _nav_data_dir(self), on_done=self._nav_export_done)
+        y_below = self._nav_setting_int("NAV_Y_PAD_BELOW", 12)
+        y_above = self._nav_setting_int("NAV_Y_PAD_ABOVE", 8)
+        ok = self._nav_exporter.start(
+            map_id, str(map_cfg.get("display_name") or map_id), dim,
+            list(bounds), y_pad_below=y_below, y_pad_above=y_above)
+        if not ok:
+            self._nav_say(notify, self._t("NAV_START_FAIL").format(map_id))
+            return
+        self._nav_notify = [n for n in notify if n]
+        self._nav_export_started = time.time()
+        try:
+            self._nav_export_task = self.server.scheduler.run_task(
+                self, self._nav_export_tick, delay=5, period=5)
+        except Exception as e:
+            self._safe_log("error", f"[ARCShooterGame] nav export task: {e}")
+        self._nav_say(notify, self._t("NAV_BAKE_STARTED").format(
+            map_cfg.get("display_name") or map_id))
+
+    def _nav_export_tick(self) -> None:
+        if self._nav_exporter is None:
+            return
+        try:
+            st = self._nav_exporter.tick()
+            if st is None or not st.get("done"):
+                return
+        except Exception:
+            self._safe_log("warning",
+                           f"[ARCShooterGame] nav export tick:\n{traceback.format_exc()}")
+            return
+        # done —— 收尾由 on_done 回调处理（bake + 播报），这里只撤任务
+        self._nav_stop_task()
+
+    def _nav_stop_task(self) -> None:
+        if self._nav_export_task is not None:
+            try:
+                self.server.scheduler.cancel_task(self._nav_export_task)
+            except Exception:
+                pass
+            self._nav_export_task = None
+
+    def _nav_export_done(self, map_id: str, ok: bool, detail: str) -> None:
+        notify = list(self._nav_notify)
+        self._nav_stop_task()
+        if not ok:
+            self._nav_say(notify, self._t("NAV_EXPORT_FAIL").format(detail))
+            return
+        try:
+            nav = self.nav.bake(map_id, force=True) if self.nav else None
+        except Exception as e:
+            self._nav_say(notify, self._t("NAV_EXPORT_FAIL").format(e))
+            return
+        if nav is None:
+            return
+        st = nav.stats
+        self._nav_say(notify, self._t("NAV_BAKE_DONE").format(
+            map_id,
+            st.get("standables", 0), st.get("edges", 0),
+            st.get("components", 0), st.get("biggest_component_pct", 0)))
+
+    def _nav_say(self, names: List[str], msg: str) -> None:
+        for name in names:
+            try:
+                p = self._get_player(str(name))
+                if p is not None:
+                    p.send_message(msg)
+            except Exception:
+                pass
+
+    def _nav_setting_int(self, key: str, default: int) -> int:
+        try:
+            assert self.config_store is not None
+            v = self.config_store.settings.GetSettingInt(key)
+            return default if v is None else int(v)
+        except Exception:
+            return default
+
+    def _nav_dimension(self, dimension_str: str):
+        """维度字符串 → Dimension 对象（get_block_at 要用）。"""
+        name = str(dimension_str or "overworld").replace("minecraft:", "")
+        for cand in (name, f"minecraft:{name}"):
+            try:
+                dim = self.server.get_dimension(cand)
+                if dim is not None:
+                    return dim
+            except Exception:
+                continue
+        return None
+
+    def _nav_spawn_list(self, map_cfg: Dict[str, Any]) -> List[Tuple[str, float, float, float]]:
+        """全模式双队出生点拍平成 [(名字, x, y, z), ...]。"""
+        out: List[Tuple[str, float, float, float]] = []
+        for mode_cfg in map_cfg.get("modes") or []:
+            mode = str(mode_cfg.get("mode") or "?")
+            teams = mode_cfg.get("teams") or {}
+            for team_key, team in teams.items():
+                for i, sp in enumerate(team.get("spawns") or []):
+                    try:
+                        out.append((f"{mode}/{team_key}/{i + 1}",
+                                    float(sp.get("x", 0)), float(sp.get("y", 0)),
+                                    float(sp.get("z", 0))))
+                    except (TypeError, ValueError):
+                        continue
+        return out
+
+    def _handle_nav_report(self, sender: CommandSender, map_id: str) -> None:
+        assert self.config_store is not None
+        ids = [map_id] if map_id else self._nav_map_ids()
+        if not ids:
+            sender.send_message(self._t("NAV_NO_MAPS"))
+            return
+        for mid in ids:
+            cfg = self.config_store.maps.get(mid)
+            if cfg is None:
+                sender.send_message(self._t("NAV_MAP_NOT_FOUND").format(mid))
+                continue
+            st = self.nav.status(mid) if self.nav else {"maps": []}
+            info = next((m for m in st.get("maps", [])
+                         if m.get("map_id") == mid), None)
+            sender.send_message(self._t("NAV_REPORT_HEAD").format(
+                cfg.get("display_name") or mid, mid,
+                (info or {}).get("state", self._t("NAV_NO_DATA"))))
+            spawns = self._nav_spawn_list(cfg)
+            if spawns and self.nav:
+                res = self.nav.spawn_check(mid, spawns)
+                sender.send_message(self._t("NAV_SPAWN_SUMMARY").format(res["text"]))
+                for line in res.get("detail", [])[:12]:
+                    sender.send_message(f"§7  {line}")
+                if res.get("oneway"):
+                    sender.send_message(self._t("NAV_SPAWN_ONEWAY").format(
+                        ", ".join(f"{a}→{b}" for a, b, _v in res["oneway"][:6])))
+                if res.get("unreachable"):
+                    sender.send_message(self._t("NAV_SPAWN_UNREACHABLE").format(
+                        ", ".join(f"{a}→{b}" for a, b in res["unreachable"][:6])))
+            elif not spawns:
+                sender.send_message(self._t("NAV_NO_SPAWNS"))
+
+    def api_request_path(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
+        """给其他插件（AI 假人）调用的烘焙导航寻路。
+
+        主线程调用。``map_id`` 传空串/None 时按起点坐标自动定位地图。
+        start/goal 接受 (x, y, z) 或 (x, y, z, dimension)。
+        返回 {"ok", "text", "path": [[x,y,z], ...]}（不可达时 path 空）。
+        """
+        try:
+            if self.nav is None:
+                return {"ok": False, "text": "api_request_path: nav 未初始化", "path": []}
+            mid = str(map_id or "")
+            if not mid:
+                assert self.config_store is not None
+                dim = str(start[3]) if len(tuple(start)) > 3 else "overworld"
+                hits = find_maps_at_point(self.config_store.maps,
+                                          float(start[0]), float(start[1]),
+                                          float(start[2]), dim)
+                mid = next((str(h.get("id")) for h in hits
+                            if self.nav.has_blocks(str(h.get("id")))), "")
+                if not mid:
+                    return {"ok": False, "text": "api_request_path: 起点不在任何已导出的地图里",
+                            "path": []}
+            return self.nav.query(mid, start, goal)
+        except Exception as exc:
+            return {"ok": False, "text": f"api_request_path: {exc}", "path": []}
+
+    def api_nav_status(self, map_id: Optional[str] = None) -> Dict[str, Any]:
+        """烘焙状态与统计（api_* 约定）。"""
+        try:
+            if self.nav is None:
+                return {"ok": False, "text": "api_nav_status: nav 未初始化", "maps": []}
+            return self.nav.status(map_id)
+        except Exception as exc:
+            return {"ok": False, "text": f"api_nav_status: {exc}", "maps": []}
+
+    def api_bake_nav(self, map_id: str) -> Dict[str, Any]:
+        """用已有 blocks-v1 地形（内置基线或上次导出）烘焙导航网格。主线程。"""
+        try:
+            if self.nav is None:
+                return {"ok": False, "text": "api_bake_nav: nav 未初始化"}
+            nav = self.nav.bake(str(map_id), force=True)
+            return {"ok": True, "text": f"{map_id}: {nav.stats}", "stats": nav.stats}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_bake_nav: {exc}"}
+
+    def api_export_map(self, map_id: str) -> Dict[str, Any]:
+        """程序化触发地图导出（同 /gs bake）。异步执行，完成看日志。"""
+        try:
+            assert self.config_store is not None
+            if map_id not in self.config_store.maps:
+                return {"ok": False, "text": f"api_export_map: 地图 {map_id} 不存在"}
+            self._nav_start_export(str(map_id), [])
+            return {"ok": True, "text": f"地图 {map_id} 导出已开始"}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_export_map: {exc}"}
 
     def api_quick_join(self, player: Any, quiet: bool = False,
                        lobby_id: str = "") -> Dict[str, Any]:
@@ -4622,6 +4925,10 @@ class ARCShooterGamePlugin(Plugin):
             label = self._mode_button_label(map_cfg, mode)
             form.add_button(label, on_click=lambda sender, mid=map_id, md=mode: self._show_mode_edit(sender, mid, md))
         form.add_button(self._t("BTN_ADD_MODE"), on_click=lambda sender, m=map_id: self._show_add_mode_form(sender, m))
+        form.add_button(self._t("BTN_NAV_BAKE"), on_click=lambda sender, m=map_id: self._nav_start_export(
+            m, [str(getattr(sender, "name", "") or "")]))
+        form.add_button(self._t("BTN_NAV_REPORT"), on_click=lambda sender, m=map_id: self._handle_nav_report(
+            sender, m))
         form.add_button(self._t("BTN_RENAME_MAP"), on_click=lambda sender, m=map_id: self._show_rename_map_form(sender, m))
         form.add_button(self._t("BTN_DELETE_MAP"), on_click=lambda sender, m=map_id: self._show_delete_map_confirm(sender, m))
         form.add_button(self._t("BACK"), on_click=lambda sender: self._show_config_maps(sender))
