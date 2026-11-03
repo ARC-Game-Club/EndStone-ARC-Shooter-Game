@@ -42,6 +42,7 @@ from endstone_arc_shooter_game.config import (
     get_mode_config,
     has_region,
     nearest_spawn_index,
+    normalize_dimension_name,
     normalize_team_arg,
     region_bounds,
     map_incomplete_reasons,
@@ -1239,14 +1240,24 @@ class ARCShooterGamePlugin(Plugin):
             mid = str(map_id or "")
             if not mid:
                 assert self.config_store is not None
-                dim = str(start[3]) if len(tuple(start)) > 3 else "overworld"
+                dim = normalize_dimension_name(
+                    start[3] if len(tuple(start)) > 3 else "overworld")
                 hits = find_maps_at_point(self.config_store.maps,
                                           float(start[0]), float(start[1]),
                                           float(start[2]), dim)
                 mid = next((str(h.get("id")) for h in hits
                             if self.nav.has_blocks(str(h.get("id")))), "")
                 if not mid:
-                    return {"ok": False, "text": "api_request_path: 起点不在任何已导出的地图里",
+                    if hits:
+                        return {"ok": False,
+                                "text": "api_request_path: 起点所在地图没有 blocks-v1 地形数据"
+                                        f"（先 /gs bake {hits[0].get('id')}）",
+                                "path": []}
+                    return {"ok": False,
+                            "text": "api_request_path: 起点 "
+                                    f"({float(start[0]):.0f},{float(start[1]):.0f},"
+                                    f"{float(start[2]):.0f}) 不在任何已导出的地图里"
+                                    f"（维度 {dim}）",
                             "path": []}
             return self.nav.query(mid, start, goal)
         except Exception as exc:
@@ -1596,7 +1607,7 @@ class ARCShooterGamePlugin(Plugin):
             if player is None:
                 continue
             loc = player.location
-            if dimension_id_of(loc) != dim:
+            if normalize_dimension_name(dimension_id_of(loc)) != normalize_dimension_name(dim):
                 self._tp_to_team_spawn(player, lobby)
                 player.send_message(self._t("REGION_PULLBACK"))
                 continue
@@ -5626,9 +5637,10 @@ class ARCShooterGamePlugin(Plugin):
             if player is None:
                 continue
             loc = player.location
-            if dimension_id_of(loc) != dim or not point_in_region(
-                region_like, float(loc.x), float(loc.y), float(loc.z)
-            ):
+            if normalize_dimension_name(dimension_id_of(loc)) != normalize_dimension_name(dim) \
+                    or not point_in_region(
+                        region_like, float(loc.x), float(loc.y), float(loc.z)
+                    ):
                 self._tp_player(
                     name, float(entry["x"]), float(entry["y"]), float(entry["z"]),
                     dim, entry.get("yaw"), entry.get("pitch"),

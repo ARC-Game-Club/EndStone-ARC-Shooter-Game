@@ -710,6 +710,25 @@ def normalize_team_arg(raw: Any) -> Optional[str]:
     return TEAM_ARG_ALIASES.get(key)
 
 
+def normalize_dimension_name(raw: Any) -> str:
+    """维度名归一：去 ``minecraft:`` 前缀 + 转小写。
+
+    为什么必须有（2026-11-03 假人导航卡死）：地图在 DB 里存的是
+    ``'Overworld'``（建图时从玩家 location.dimension.id 抄来的），
+    而调用方给的是各种写法——``'overworld'``（脚本侧手写）、
+    ``'minecraft:overworld'``（新版 BDS 的 dimension.id）、
+    ``'Overworld'``。**不归一就比不相等**，于是
+    ``find_maps_at_point`` 一张图都找不到，``api_request_path`` 直接回
+    "起点不在任何已导出的地图里"，假人拿不到路径就原地罚站。
+
+    统一成小写裸名（overworld / nether / the_end），两边都比这个。
+    """
+    name = str(raw or "").strip().lower()
+    if name.startswith("minecraft:"):
+        name = name[len("minecraft:"):]
+    return name or "overworld"
+
+
 def find_maps_at_point(
     maps: Dict[str, Dict[str, Any]],
     x: float,
@@ -718,9 +737,10 @@ def find_maps_at_point(
     dimension: str,
 ) -> List[Dict[str, Any]]:
     """维度一致且 region 覆盖该点的地图，region 体积小者在前（重叠时最具体的一张优先）。"""
+    want_dim = normalize_dimension_name(dimension)
     hits: List[Dict[str, Any]] = []
     for entry in maps.values():
-        if str(entry.get("dimension") or "overworld") != str(dimension or "overworld"):
+        if normalize_dimension_name(entry.get("dimension")) != want_dim:
             continue
         if not has_region(entry) or not point_in_region(entry, float(x), float(y), float(z)):
             continue
