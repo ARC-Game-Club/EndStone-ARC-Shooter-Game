@@ -282,6 +282,8 @@ class ARCShooterGamePlugin(Plugin):
         self._last_attacker: Dict[str, Tuple[str, float]] = {}
         # victim -> {attacker_name: last_damage_unix}
         self._damage_log: Dict[str, Dict[str, float]] = {}
+        # api_record_kill 刚记过的击杀（防 on_player_death 双记）
+        self._kill_recorded: Dict[str, float] = {}
         self._shop_open_at: Dict[str, float] = {}
         self._saved_name_tags: Dict[str, str] = {}
         self._pending_restore: set[str] = set()
@@ -1334,6 +1336,50 @@ class ARCShooterGamePlugin(Plugin):
         except Exception as exc:
             return {"ok": False, "text": f"api_export_map: {exc}"}
 
+    def api_record_kill(self, killer_name: str, victim_name: str) -> Dict[str, Any]:
+        """给其他插件（假人桥接包）调用的击杀记录接口。
+
+        假人 fireSimShot 走自定义扣血不触发引擎 EntityDamageEvent，
+        on_player_death 拿不到 damage_source 里的击杀者——这条 API 让
+        桥接包在击杀发生时主动上报，走和引擎事件同一条结算链路
+        （apply_player_kill：比分/KD/金币/友伤判定/击杀播报）。
+        主线程调用。
+        """
+        try:
+            killer_name = str(killer_name or "")
+            victim_name = str(victim_name or "")
+            if not killer_name or not victim_name:
+                return {"ok": False, "text": "api_record_kill: 名字为空"}
+            lobby = self._lobby_of(victim_name)
+            if lobby is None or lobby.state not in (STATE_BUYING, STATE_PLAYING):
+                return {"ok": False, "text": f"api_record_kill: {victim_name} 不在对局"}
+            if self._lobby_of(killer_name) is not lobby:
+                return {"ok": False, "text": f"api_record_kill: {killer_name} 不在同房间"}
+            # 记 damage_log（助攻/TK 判定靠它）
+            self._last_attacker[victim_name] = (killer_name, time.time())
+            self._damage_log.setdefault(victim_name, {})[killer_name] = time.time()
+            self._kill_recorded[victim_name] = time.time()  # 防双记
+            result = lobby.apply_player_kill(
+                killer_name, victim_name, self.config_store.kill_reward())
+            if result:
+                killer = self._get_player(killer_name)
+                if killer:
+                    if result["friendly"]:
+                        killer.send_message(self._t("KILL_FRIENDLY_FIRE").format(victim_name))
+                    else:
+                        killer.send_message(self._t("KILL_MSG").format(victim_name))
+                        try:
+                            money = int(result.get("reward", 0))
+                            if money > 0:
+                                killer.send_message(
+                                    f"§6+{money} 弧光币（击杀 {victim_name}）")
+                        except Exception:
+                            pass
+            return {"ok": True, "text": f"击杀已记录：{killer_name} → {victim_name}",
+                    "result": result}
+        except Exception as exc:
+            return {"ok": False, "text": f"api_record_kill: {exc}"}
+
     def api_quick_join(self, player: Any, quiet: bool = False,
                        lobby_id: str = "") -> Dict[str, Any]:
         """给其他插件（如 AI 假人插件）调用的快速开始接口。
@@ -1475,11 +1521,15 @@ class ARCShooterGamePlugin(Plugin):
                     drops.clear()
                 except Exception:
                     pass
-        killer_name = self._killer_name_from_source(getattr(event, "damage_source", None))
-        if not killer_name:
-            last = self._last_attacker.get(victim_name)
-            if last and time.time() - last[1] <= 12:
-                killer_name = last[0]
+        recorded_at = self._kill_recorded.pop(victim_name, None)
+        if recorded_at is not None and time.time() - recorded_at <= 3.0:
+            killer_name = None  # api_record_kill 已计过，防双记
+        else:
+            killer_name = self._killer_name_from_source(getattr(event, "damage_source", None))
+            if not killer_name:
+                last = self._last_attacker.get(victim_name)
+                if last and time.time() - last[1] <= 12:
+                    killer_name = last[0]
         if killer_name == victim_name:
             killer_name = None
         ps = lobby.players.get(victim_name)
