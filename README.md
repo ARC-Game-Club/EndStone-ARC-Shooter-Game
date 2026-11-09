@@ -36,6 +36,7 @@ plugins/ARCShooterGame/
 | `/gs range` | 靶场开关：不在靶场 → 进靶场；已在靶场 → 退出靶场（恢复进入前的背包与位置） |
 | `/gs armory` | 直接打开军械库表单 |
 | `/gs reload` | OP：重载地图、武器、设置 |
+| `/gs report [start\|end\|all] [on\|off]` | OP：查/切往 QQ 群发的开关。不带参数 = 看状态；`start` = 开局播报（房间创建），`end` = 终局战报，`all` = 总开关。**立即生效**，并写回 `settings.yml`（重启后仍然有效） |
 | `/addspawn <模式> [队伍]` | OP：把脚下位置加为所在地图的出生点（红蓝队模式带队伍 red/blue/红/蓝，可简写 `/addspawn red`；个人死斗 `/addspawn ffa`） |
 | `/rmspawn <模式> [队伍]` | OP：删除脚下 3 格内最近的指定出生点（参数同上） |
 | `/setrange <pos1\|pos2\|entry\|show\|clear>` | OP：配置靶场范围两角与传送点（走到对应位置执行） |
@@ -145,11 +146,17 @@ QQ_REPORT_END=1
 | `BUY_TIME_SECONDS` | 开局购买/配置窗时长（无敌 + 弧光币换装） |
 | `TEAM_A_DEFAULT_ARMOR` / `TEAM_B_DEFAULT_ARMOR` | 按队色开局自动发放的默认护甲（JSON 嵌套：头盔/胸甲/护腿） |
 | `QQ_REPORT_ENABLED` | 战报总开关：`1` 开、`0` 关 |
-| `QQ_REPORT_START` | 开赛时往 QQ 群发一条开局播报 |
-| `QQ_REPORT_END` | 终局往 QQ 群发一条战报（比分 + 每人击杀/死亡/助攻） |
+| `QQ_REPORT_START` | 开赛时往 QQ 群发一条**开局播报**（= 房间创建播报：地图/模式/两边名单/目标分） |
+| `QQ_REPORT_END` | 终局往 QQ 群发一条**战报**（比分 + 每人击杀/死亡/助攻） |
 
 > 战报经**群服互通插件**（`arc_qq_sync_astrbot`）发进 QQ 群，消息前面自动带
 > 服务器名。该插件不在、或没连上消息中枢时，战报静默跳过（不影响对局）。
+
+> **运行时切换**：这三个键都能用 `/gs report <start|end|all> <on|off>` 改，
+> 改完**立刻生效**（不用重启），同时写回 `settings.yml`（重启后仍然有效）。
+> 嫌群里吵的时候 `/gs report all off` 一条命令就闭嘴；想恢复
+> `/gs report all on`。注意 `settings.yml` 是**启动时**读的，光改文件
+> 不重启不生效——用这条命令就绕开了这个限制。
 
 ## 武器 `weapons.json`
 
@@ -184,6 +191,21 @@ python -m unittest tests.test_logic # 只跑逻辑测试
 `tests/test_logic.py` 导入时自动把 `src/` 挂上 `sys.path`，**不需要设 PYTHONPATH**。
 
 ## 更新日志
+
+### v0.4.54
+
+- **群消息开关可运行时切换**：新增 `/gs report [start|end|all] [on|off]`（OP，控制台也能用）
+  - `start` = 开局播报（房间创建那条：地图/模式/两边名单/目标分）
+  - `end` = 终局战报（比分 + 每人击杀/死亡/助攻）
+  - `all` = 总开关
+  - 不带参数 = 看当前三个开关的状态
+  - **立刻生效，不用重启服务器**；同时写回 `settings.yml`，重启后仍然有效
+- 为什么加这条：以前只能手动改 `settings.yml` 再 `/gs reload` 或重启。群里太吵时
+  服主想立刻闭嘴，不该被一次重启卡住
+- 开关语义没变（`QQ_REPORT_ENABLED` 是总闸，`START`/`END` 是分项），只是多了一个
+  运行时入口；`settings.yml` 里手改这三个键依然有效
+- 补单测 `tests/test_qq_report.py` 的 `ReportCommandTests`（8 项）：关掉后确实
+  不再发群、开回来能恢复、非 OP 改不了、查状态不碰开关
 
 ### v0.4.35
 

@@ -22,6 +22,21 @@ from endstone_arc_shooter_game.qq_report import (  # noqa: E402
     build_end_report,
     build_start_report,
 )
+from endstone import Player  # noqa: E402  stub 里的占位 Player
+
+
+def make_sender(is_op=True):
+    """造一个"像真的玩家"的指令发送者。
+
+    ⚠ 必须真的是 ``Player`` 实例：``_is_op`` 靠 ``isinstance(sender, Player)``
+    区分玩家和控制台——玩家查 ``is_op``，控制台直接放行。用 SimpleNamespace
+    会被当成控制台，测出来的"非 OP 被拦"是假的。
+    """
+    sender = Player()
+    sender.is_op = is_op
+    sender.sent = []
+    sender.send_message = sender.sent.append
+    return sender
 
 
 def make_player(name, team, kills=0, deaths=0, assists=0, tk=0, still_in=True):
@@ -54,9 +69,16 @@ def make_lobby(players=None, score_a=0, score_b=0, map_name="ARCShooterGame",
 class FakeSettings:
     def __init__(self, values):
         self.values = dict(values)
+        #: SetSetting 的调用记录——用来断言"真的写回 settings.yml 了"。
+        self.set_calls = []
 
     def GetSetting(self, key):
         return self.values.get(key)
+
+    def SetSetting(self, key, value):
+        """模拟 SettingManager.SetSetting：改内存值并记录写入。"""
+        self.values[key] = str(value)
+        self.set_calls.append((key, str(value)))
 
 
 class FakeConfigStore:
@@ -283,6 +305,91 @@ class PluginSideTests(unittest.TestCase):
         self.assertEqual(len(qq.calls), 1)
         self.assertEqual(qq.calls[0][0], "custom")
         self.assertIn("战报", qq.calls[0][3])
+
+
+class ReportCommandTests(unittest.TestCase):
+    """``/gs report``：运行时切群消息开关（不用重启服务器）。"""
+
+    def test_off_start_stops_room_creation_broadcast(self):
+        """房主嫌吵 → 关掉开局播报 → 建房时不再往群里发。"""
+        qq = FakeQQPlugin()
+        plugin = make_plugin(qq)
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["start", "off"])
+        # 开关写回 settings.yml
+        self.assertIn(("QQ_REPORT_START", "0"),
+                      plugin.config_store.settings.set_calls)
+        # 立刻生效：建房播报不再发，终局战报照发
+        plugin._qq_report_start(make_lobby([make_player("Aqing", "a")]))
+        self.assertEqual(qq.calls, [])
+        plugin._qq_report_end(make_lobby([make_player("Aqing", "a")]), "a")
+        self.assertEqual(len(qq.calls), 1)
+
+    def test_off_end_stops_battle_report(self):
+        qq = FakeQQPlugin()
+        plugin = make_plugin(qq)
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["end", "off"])
+        self.assertIn(("QQ_REPORT_END", "0"),
+                      plugin.config_store.settings.set_calls)
+        plugin._qq_report_end(make_lobby([make_player("Aqing", "a")]), "a")
+        self.assertEqual(qq.calls, [])
+        plugin._qq_report_start(make_lobby([make_player("Aqing", "a")]))
+        self.assertEqual(len(qq.calls), 1)
+
+    def test_off_all_stops_everything(self):
+        qq = FakeQQPlugin()
+        plugin = make_plugin(qq)
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["all", "off"])
+        plugin._qq_report_start(make_lobby([make_player("Aqing", "a")]))
+        plugin._qq_report_end(make_lobby([make_player("Aqing", "a")]), "a")
+        self.assertEqual(qq.calls, [])
+
+    def test_on_restores_broadcast(self):
+        """关了还能再开回来——这是"可开关"的意义所在。"""
+        qq = FakeQQPlugin()
+        plugin = make_plugin(qq, settings={"QQ_REPORT_ENABLED": "1",
+                                           "QQ_REPORT_START": "0",
+                                           "QQ_REPORT_END": "0"})
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["start", "on"])
+        self.assertIn(("QQ_REPORT_START", "1"),
+                      plugin.config_store.settings.set_calls)
+        plugin._qq_report_start(make_lobby([make_player("Aqing", "a")]))
+        self.assertEqual(len(qq.calls), 1)
+
+    def test_status_without_args_reports_all_three(self):
+        plugin = make_plugin(settings={"QQ_REPORT_ENABLED": "1",
+                                       "QQ_REPORT_START": "0",
+                                       "QQ_REPORT_END": "1"})
+        sender = make_sender()
+        plugin._handle_report_command(sender, [])
+        self.assertEqual(len(sender.sent), 1)
+        self.assertIn("REPORT_STATUS", sender.sent[0])
+        # 查状态不该改任何开关
+        self.assertEqual(plugin.config_store.settings.set_calls, [])
+
+    def test_bad_target_is_rejected(self):
+        plugin = make_plugin()
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["nope", "off"])
+        self.assertIn("REPORT_BAD_TARGET", sender.sent[0])
+        self.assertEqual(plugin.config_store.settings.set_calls, [])
+
+    def test_bad_value_is_rejected(self):
+        plugin = make_plugin()
+        sender = make_sender()
+        plugin._handle_report_command(sender, ["start", "maybe"])
+        self.assertIn("REPORT_BAD_VALUE", sender.sent[0])
+        self.assertEqual(plugin.config_store.settings.set_calls, [])
+
+    def test_non_op_cannot_change_switch(self):
+        plugin = make_plugin()
+        sender = make_sender(is_op=False)
+        plugin._handle_report_command(sender, ["start", "off"])
+        self.assertIn("CMD_NO_PERMISSION", sender.sent[0])
+        self.assertEqual(plugin.config_store.settings.set_calls, [])
 
 
 if __name__ == "__main__":

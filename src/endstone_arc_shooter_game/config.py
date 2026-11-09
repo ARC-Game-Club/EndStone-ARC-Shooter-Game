@@ -332,7 +332,8 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'ammo_scoreboard': 'm1911Ammo',
               'default_ammo': 7,
               'category': 'pistol',
-              'unlock_level': 0},
+              # 2026-11-04 服主：大威力手枪，强度配当主武器 → 高等级解锁
+              'unlock_level': 30},
              {'id': 'glock17',
               'display_name': '格洛克 17',
               'item': 'arc:glock17',
@@ -341,7 +342,8 @@ DEFAULT_WEAPONS = {'_comment': '弧光枪械：type=槽位；category=分类筛�
               'ammo_scoreboard': 'glock17Ammo',
               'default_ammo': 18,
               'category': 'pistol',
-              'unlock_level': 2},
+              # 2026-11-04 服主：0 级默认手枪改格洛克（原 m1911 挪走后顶上）
+              'unlock_level': 0},
              {'id': 'pdp',
               'display_name': '瓦尔特 PDP',
               'item': 'arc:pdp',

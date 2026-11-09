@@ -668,6 +668,11 @@ class ARCShooterGamePlugin(Plugin):
                 return True
             self._handle_nav_report(sender, args[1] if len(args) > 1 else "")
             return True
+        if sub == "report":
+            # /gs report [start|end|all] [on|off]：群消息（开局播报/终局战报）
+            # 开关。控制台也能用。
+            self._handle_report_command(sender, args[1:] if len(args) > 1 else [])
+            return True
         if not isinstance(sender, Player):
             resolved = self._resolve_player_for_command_sender(sender)
             if resolved is None:
@@ -3452,6 +3457,14 @@ class ARCShooterGamePlugin(Plugin):
     QQ_REPORT_START_KEY = "QQ_REPORT_START"
     QQ_REPORT_END_KEY = "QQ_REPORT_END"
 
+    #: ``/gs report <目标> <on|off>`` 的目标名 → settings.yml 键。
+    #: ``start`` = 开局播报（房间创建时那条），``end`` = 终局战报。
+    QQ_REPORT_TARGETS = {
+        "start": QQ_REPORT_START_KEY,
+        "end": QQ_REPORT_END_KEY,
+        "all": QQ_REPORT_ENABLED_KEY,
+    }
+
     def _qq_report_flag(self, key: str) -> bool:
         """读 settings.yml 里的开关（1/0、true/false 都认）。"""
         store = getattr(self, "config_store", None)
@@ -3465,6 +3478,92 @@ class ARCShooterGamePlugin(Plugin):
         if raw is None:
             return False
         return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+    def _qq_report_set_flag(self, key: str, value: bool) -> bool:
+        """把开关写回 settings.yml（立即生效，且重启后仍然生效）。
+
+        ``SettingManager.SetSetting`` 会重写整个 settings.yml，所以这里
+        直接调它——不要自己拼文件，那会漏掉别的键。
+        """
+        store = getattr(self, "config_store", None)
+        settings = getattr(store, "settings", None)
+        if settings is None:
+            return False
+        try:
+            settings.SetSetting(key, "1" if value else "0")
+        except Exception as exc:
+            self._safe_log(
+                "warning",
+                "[ARCShooterGame] 写入群消息开关失败 {0}: {1}".format(key, exc))
+            return False
+        return True
+
+    def _handle_report_command(self, sender: CommandSender,
+                               args: list[str]) -> None:
+        """``/gs report [start|end|all] [on|off]``：查/切群消息开关。
+
+        为什么要有这条命令：以前只能手动改 settings.yml 再重启（或
+        ``/gs reload``）才关得掉战报。群里太吵时服主想立刻闭嘴，
+        不该被一次重启卡住。
+
+        ``/gs report``（不带参数）= 看当前状态。
+        """
+        if not self._is_op(sender):
+            sender.send_message(self._t("CMD_NO_PERMISSION"))
+            return
+        store = getattr(self, "config_store", None)
+        settings = getattr(store, "settings", None)
+        if settings is None:
+            sender.send_message(self._t("RELOAD_FAIL").format("设置未就绪"))
+            return
+
+        def _onoff(key: str) -> str:
+            return "§a开" if self._qq_report_flag(key) else "§c关"
+
+        # 不带参数 = 只看状态
+        if not args:
+            sender.send_message(self._t("REPORT_STATUS").format(
+                _onoff(self.QQ_REPORT_START_KEY),
+                _onoff(self.QQ_REPORT_END_KEY),
+                _onoff(self.QQ_REPORT_ENABLED_KEY),
+            ))
+            return
+
+        target = str(args[0] or "").strip().lower()
+        key = self.QQ_REPORT_TARGETS.get(target)
+        if key is None:
+            sender.send_message(self._t("REPORT_BAD_TARGET").format(target))
+            return
+
+        # 只给了目标、没给开关值 → 报这个目标当前的状态
+        if len(args) < 2:
+            sender.send_message(self._t("REPORT_STATUS").format(
+                _onoff(self.QQ_REPORT_START_KEY),
+                _onoff(self.QQ_REPORT_END_KEY),
+                _onoff(self.QQ_REPORT_ENABLED_KEY),
+            ))
+            return
+
+        raw = str(args[1] or "").strip().lower()
+        if raw in ("on", "1", "true", "yes", "enable", "开"):
+            value = True
+        elif raw in ("off", "0", "false", "no", "disable", "关"):
+            value = False
+        else:
+            sender.send_message(self._t("REPORT_BAD_VALUE").format(raw))
+            return
+
+        if not self._qq_report_set_flag(key, value):
+            sender.send_message(self._t("RELOAD_FAIL").format("写入设置失败"))
+            return
+        label = {
+            self.QQ_REPORT_START_KEY: "开局播报（房间创建）",
+            self.QQ_REPORT_END_KEY: "终局战报",
+            self.QQ_REPORT_ENABLED_KEY: "总开关",
+        }.get(key, key)
+        sender.send_message(self._t("REPORT_SET_OK").format(
+            label, "§a开" if value else "§c关"))
+        sender.send_message(self._t("REPORT_SAVED"))
 
     def _qq_send_report(self, text: str) -> bool:
         """把一段战报文本发进 QQ 群（经群服互通插件）。
