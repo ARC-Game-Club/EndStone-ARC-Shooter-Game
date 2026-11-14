@@ -76,6 +76,7 @@ from endstone_arc_shooter_game.inventory import (
 from endstone_arc_shooter_game.language import LanguageManager
 from endstone_arc_shooter_game.nav.exporter import TickingAreaMapExporter
 from endstone_arc_shooter_game.nav.navmap import NavService
+from endstone_arc_shooter_game.nav.spawns import compute_ffa_spawn_pool
 from endstone_arc_shooter_game import qq_report
 
 
@@ -110,6 +111,8 @@ from endstone_arc_shooter_game.session import (
     TEAM_B,
     Lobby,
     PlayerState,
+    compute_bot_online_quota,
+    pick_assist_lobby,
     pick_spawn,
 )
 
@@ -316,6 +319,10 @@ class ARCShooterGamePlugin(Plugin):
         # 导出/烘焙进度要播报给谁（表单按钮触发时记录玩家名）
         self._nav_notify: List[str] = []
         self._nav_export_started: float = 0.0
+        # 假人调度巡检：下次可执行时间戳（time.time()；0 = 立即）。
+        # 任务本体 20s 一拍，60s 节流在 _bot_balance_tick 里做——
+        # BOT_BALANCE_INTERVAL_SECONDS 改配置即时生效，不用重启。
+        self._bot_balance_at: float = 0.0
 
     def _safe_log(self, level: str, message: str) -> None:
         if hasattr(self, "logger") and self.logger is not None:
@@ -433,6 +440,14 @@ class ARCShooterGamePlugin(Plugin):
                 self, self._nav_map_ticking_areas, delay=100)
         except Exception as e:
             self._safe_log("warning", f"[ARCShooterGame] 战场常加载调度失败: {e}")
+        # 假人调度巡检（默认 60s）：配额推送 + 真人房缺人时挪 AI 支援。
+        # 任务 20s 一拍，60s 节流在 _bot_balance_tick 里做——
+        # 改 BOT_BALANCE_INTERVAL_SECONDS 不用重启。
+        try:
+            self.server.scheduler.run_task(
+                self, self._bot_balance_tick, delay=200, period=400)
+        except Exception as e:
+            self._safe_log("warning", f"[ARCShooterGame] 假人调度巡检注册失败: {e}")
         self._register_arc_main_menu_button()
         self._safe_log("info", "[ARCShooterGame] enabled")
 
@@ -673,6 +688,15 @@ class ARCShooterGamePlugin(Plugin):
             # 开关。控制台也能用。
             self._handle_report_command(sender, args[1:] if len(args) > 1 else [])
             return True
+        if sub == "ffaspawn":
+            # /gs ffaspawn [map_id]：个人死斗出生点池强制重算（覆盖 a 池）
+            # 正常只在第一次给地图创建 ffa 模式时自动算一次；这条命令用于
+            # 重算（导航重烘后/点位不满意时）。
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return True
+            self._handle_ffaspawn_command(sender, args[1] if len(args) > 1 else "")
+            return True
         if not isinstance(sender, Player):
             resolved = self._resolve_player_for_command_sender(sender)
             if resolved is None:
@@ -786,6 +810,13 @@ class ARCShooterGamePlugin(Plugin):
             return
         if not self._playable_maps():
             player.send_message(self._t("CREATE_LOBBY_NO_MAPS"))
+            return
+        # AI 群体最多自建一间大厅：已有纯 AI 等待房时，假人 quick 不再
+        # 建新房（散进各处的 AI 房会把可玩地图全占掉，真人反而没图开）。
+        # 真人 quick 不受限。bake 模式的 api_create_lobby_for_map 也不受限
+        # （功能性探图，逐图占位是刻意的）。
+        if self._is_bot_player(player.name) and self._bot_only_waiting_lobby_exists():
+            player.send_message(self._t("BOT_LOBBY_LIMIT"))
             return
         player.send_message("§a没有可加入的房间，已为你创建新房（随机地图/模式）")
         self._create_lobby(player)
@@ -1035,7 +1066,12 @@ class ARCShooterGamePlugin(Plugin):
             fill = getattr(afp, "api_fill_shooter", None)
             if not callable(fill):
                 return
-            max_players = lobby.max_per_team * 2
+            # ffa 的 max_per_team 就是总人数上限（pick_join_team 单池），
+            # 再 ×2 会按双倍要人——个人死斗房会被塞爆。
+            if lobby.active_mode == "ffa":
+                max_players = lobby.max_per_team
+            else:
+                max_players = lobby.max_per_team * 2
             free = max_players - lobby.player_count()
             if free <= 0:
                 return
@@ -1048,6 +1084,110 @@ class ARCShooterGamePlugin(Plugin):
                 fill(free)          # 老版本假人插件只认一个参数
         except Exception as exc:
             self._safe_log("debug", f"fill_with_bots: {exc}")
+
+    # ---------- 假人调度巡检：配额推送 + 真人房迁移支援 ----------
+
+    def _afp_api(self, api_name: str):
+        """拿 arc_fake_player 插件的某个 api（不在/旧版没这接口 → None）。"""
+        pm = getattr(self.server, "plugin_manager", None)
+        afp = pm.get_plugin("arc_fake_player") if pm else None
+        fn = getattr(afp, api_name, None)
+        return fn if callable(fn) else None
+
+    def _lobby_has_human(self, lobby: Lobby) -> bool:
+        for ps in lobby.online_players():
+            if not self._is_bot_player(ps.name):
+                return True
+        return False
+
+    def _bot_only_waiting_lobby_exists(self) -> bool:
+        """是否已有一间"纯 AI 等待房"（全员假人且还在等待/倒计时）。
+        有 → 假人 quick 不允许再建新房（AI 群体最多自建一间）。"""
+        for lobby in self.lobbies.values():
+            if lobby.state not in (STATE_LOBBY, STATE_COUNTDOWN):
+                continue
+            members = lobby.online_players()
+            if members and all(self._is_bot_player(ps.name) for ps in members):
+                return True
+        return False
+
+    def _bot_balance_tick(self) -> None:
+        """假人调度巡检（默认 60s 一轮，20s 任务内自行节流）：
+        1) 按地图规模 + 等待大厅数算在线假人配额，推给假人插件；
+        2) 真人建的等待大厅缺人 → 请假人插件挪 1 个 AI 过去支援。
+        任何一步失败只记日志，绝不影响对局。"""
+        try:
+            now = time.time()
+            interval = (
+                self.config_store.bot_balance_interval()
+                if self.config_store else 60
+            )
+            if now < getattr(self, "_bot_balance_at", 0.0):
+                return
+            self._bot_balance_at = now + max(10, interval)
+
+            waiting = 0
+            lobbies_desc: List[Dict[str, Any]] = []
+            for lobby in self.lobbies.values():
+                is_waiting = lobby.state in (STATE_LOBBY, STATE_COUNTDOWN)
+                if is_waiting:
+                    waiting += 1
+                joinable, _r = lobby.can_join()
+                lobbies_desc.append({
+                    "lobby_id": lobby.lobby_id,
+                    "started_at": lobby.lobby_started_at,
+                    "has_human": self._lobby_has_human(lobby),
+                    "waiting": is_waiting,
+                    "joinable": joinable,
+                    "ready": lobby.teams_ready_to_start(),
+                })
+
+            # 1) 配额推送（旧版假人插件没这接口 → 静默跳过）
+            if self.config_store is not None:
+                quota = compute_bot_online_quota(
+                    waiting,
+                    len(self._playable_maps()),
+                    base=self.config_store.bot_online_base(),
+                    per_lobby=self.config_store.bot_online_per_lobby(),
+                    hard_max=self.config_store.bot_online_max(),
+                )
+                quota_api = self._afp_api("api_shooter_online_quota")
+                if quota_api is not None:
+                    try:
+                        quota_api(quota)
+                    except Exception as exc:
+                        self._safe_log("debug", f"bot quota push: {exc}")
+
+            # 2) 迁移支援：每轮最多挪 1 个
+            target_id = pick_assist_lobby(lobbies_desc)
+            if target_id is None:
+                return
+            lobby = self.lobbies.get(target_id)
+            if lobby is None:
+                return
+            assist = self._afp_api("api_shooter_assist")
+            if assist is None:
+                return
+            try:
+                result = assist(target_id)
+            except Exception as exc:
+                self._safe_log("debug", f"bot assist call: {exc}")
+                return
+            if not (isinstance(result, dict) and result.get("ok")):
+                return
+            moved = result.get("name") or ""
+            self._safe_log(
+                "info",
+                f"[ARCShooterGame] 假人调度：{moved or '一名 AI'} 已支援大厅 "
+                f"{target_id}（真人 {lobby.player_count() - 1 if moved else lobby.player_count()} 人等待）",
+            )
+            # 挪完人齐了 → 提醒房主可以开局（开局权仍归房主，不代按）
+            if lobby.teams_ready_to_start():
+                admin = self._get_player(lobby.admin or "")
+                if admin is not None:
+                    admin.send_message(self._t("BOT_ASSIST_READY"))
+        except Exception as exc:
+            self._safe_log("debug", f"bot_balance_tick: {exc}")
 
     # ==================================================================
     # 导航网格：命令 / 表单 / API（nav/ 子系统）
@@ -1487,8 +1627,10 @@ class ARCShooterGamePlugin(Plugin):
             if lobby.state == STATE_PLAYING:
                 killer_ps = lobby.players.get(killer_name)
                 victim_ps = lobby.players.get(victim_name)
+                # 个人死斗没有队友：所有人都算敌人，不弹误伤提示
                 if (
-                    killer_ps is not None
+                    lobby.active_mode != "ffa"
+                    and killer_ps is not None
                     and victim_ps is not None
                     and killer_ps.team == victim_ps.team
                 ):
@@ -1949,6 +2091,22 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(msg)
         self.lobbies.pop(lobby.lobby_id, None)
 
+    def _start_phase_title(
+        self, lobby: Lobby, ps: PlayerState, default_sub: str
+    ) -> Tuple[str, str]:
+        """开局/开战阶段的个人 title：分队模式显示"你是 X 队"；
+        个人死斗显示"你是所有人敌人 + 目标击杀数"。"""
+        if lobby.active_mode == "ffa":
+            return (
+                self._t("TITLE_FFA_YOU"),
+                self._t("TITLE_FFA_SUB").format(lobby.target_score),
+            )
+        color = TEAM_NAME_COLOR.get(ps.team, "§f")
+        return (
+            self._t("TITLE_YOUR_TEAM").format(color, lobby.team_name(ps.team)),
+            default_sub,
+        )
+
     def _start_match(self, player: Player, lobby: Lobby) -> None:
         if lobby.admin != player.name:
             player.send_message(self._t("CMD_NO_PERMISSION"))
@@ -2074,12 +2232,11 @@ class ARCShooterGamePlugin(Plugin):
             member = self._get_player(ps.name)
             if member is None:
                 continue
-            color = TEAM_NAME_COLOR.get(ps.team, "§f")
-            team_name = lobby.team_name(ps.team)
+            title, sub = self._start_phase_title(lobby, ps, buy_sub)
             self._send_title(
                 member,
-                self._t("TITLE_YOUR_TEAM").format(color, team_name),
-                buy_sub,
+                title,
+                sub,
                 fade_in=5,
                 stay=55,
                 fade_out=10,
@@ -2126,12 +2283,11 @@ class ARCShooterGamePlugin(Plugin):
                 member = self._get_player(ps.name)
                 if member is None:
                     continue
-                color = TEAM_NAME_COLOR.get(ps.team, "§f")
-                team_name = lobby.team_name(ps.team)
+                title, sub = self._start_phase_title(lobby, ps, battle_sub)
                 self._send_title(
                     member,
-                    self._t("TITLE_YOUR_TEAM").format(color, team_name),
-                    battle_sub,
+                    title,
+                    sub,
                     fade_in=5,
                     stay=55,
                     fade_out=10,
@@ -2722,12 +2878,13 @@ class ARCShooterGamePlugin(Plugin):
         ps = lobby.players.get(player.name)
         if ps is None:
             return
-        color = TEAM_NAME_COLOR.get(ps.team, "§f")
-        team_name = lobby.team_name(ps.team)
+        title, sub = self._start_phase_title(lobby, ps, self._t("TITLE_YOUR_TEAM_SUB"))
+        if lobby.active_mode != "ffa":
+            sub = self._t("TITLE_YOUR_TEAM_SUB")
         self._send_title(
             player,
-            self._t("TITLE_YOUR_TEAM").format(color, team_name),
-            self._t("TITLE_YOUR_TEAM_SUB"),
+            title,
+            sub,
             fade_in=5,
             stay=50,
             fade_out=10,
@@ -2754,12 +2911,15 @@ class ARCShooterGamePlugin(Plugin):
         if self.config_store is not None:
             window = self.config_store.assist_window_seconds()
         team_of = {name: p.team for name, p in lobby.players.items()}
+        # 个人死斗没有队友：伤害过受害者的人全算助攻（victim_team 用
+        # 哨兵值 → 没人会被判 TK）
+        victim_team = "__ffa_no_teams__" if lobby.active_mode == "ffa" else victim_ps.team
         assists, tks = collect_assist_and_tk(
             self._damage_log.get(victim_name) or {},
             now=time.time(),
             window=window,
             killer_name=killer_name,
-            victim_team=victim_ps.team,
+            victim_team=victim_team,
             team_of=team_of,
         )
         for name in assists:
@@ -2809,7 +2969,11 @@ class ARCShooterGamePlugin(Plugin):
         spawns = lobby.team_spawns(ps.team)
         if not spawns:
             return
-        pos = pick_spawn(spawns)
+        if lobby.active_mode == "ffa":
+            # 个人死斗：最大连通域出生点池里随机挑一个"半径内没有敌人"的点
+            pos = self._pick_ffa_spawn(lobby, spawns, player.name)
+        else:
+            pos = pick_spawn(spawns)
         self._tp_player(
             player.name,
             pos["x"],
@@ -2819,6 +2983,123 @@ class ARCShooterGamePlugin(Plugin):
             pos.get("yaw"),
             pos.get("pitch"),
         )
+
+    #: 个人死斗复活选点半径梯度：配置半径（FFA_SPAWN_ENEMY_RADIUS）找不到
+    #: 点时按这个顺序逐档放宽，全都不达标才是纯随机兜底
+    #: （2026-11-14 服主："10 没有点就 5，再到 3、1 去找"）。
+    _FFA_SPAWN_RADIUS_LADDER = (5.0, 3.0, 1.0)
+
+    def _pick_ffa_spawn(
+        self, lobby: Lobby, spawns: List[Dict[str, Any]], exclude_name: Optional[str]
+    ) -> Dict[str, float]:
+        """个人死斗复活选点：洗牌后按半径梯度（配置值 → 5 → 3 → 1）找
+        第一个与所有其他参战者水平距离都达标的出生点；全部贴脸时才兜底
+        纯随机。"""
+        radius = 10.0
+        if self.config_store is not None:
+            radius = self.config_store.ffa_spawn_enemy_radius()
+        radii = sorted(
+            {r for r in (radius,) + self._FFA_SPAWN_RADIUS_LADDER if r > 0},
+            reverse=True,
+        )
+        enemies: List[Tuple[float, float]] = []
+        for ps in lobby.online_players():
+            if ps.name == exclude_name:
+                continue
+            member = self._get_player(ps.name)
+            if member is None:
+                continue
+            try:
+                loc = member.location
+                enemies.append((float(loc.x), float(loc.z)))
+            except Exception:
+                continue
+        order = list(spawns)
+        random.shuffle(order)
+        for r in radii:
+            r2 = r * r
+            for spawn in order:
+                sx = float(spawn.get("x") or 0)
+                sz = float(spawn.get("z") or 0)
+                if all(
+                    (sx - ex) * (sx - ex) + (sz - ez) * (sz - ez) > r2
+                    for ex, ez in enemies
+                ):
+                    return pick_spawn([spawn])
+        return pick_spawn(spawns)
+
+    def _generate_ffa_spawn_pool(
+        self, map_id: str, *, force: bool
+    ) -> Tuple[bool, str]:
+        """个人死斗出生点池：导航网格最大连通域采样 → 存 a 池持久化复用。
+
+        首次创建 ffa 模式（force=True）或 /gs ffaspawn（force=True）时计算；
+        force=False 只在 a 池为空时补算。返回 (成功?, 描述)。
+        """
+        assert self.config_store is not None
+        map_cfg = self.config_store.maps.get(map_id)
+        if map_cfg is None:
+            return False, "map_missing"
+        mode_cfg = get_mode_config(map_cfg, "ffa")
+        if mode_cfg is None:
+            return False, "mode_missing"
+        a_spawns = ((mode_cfg.get("teams") or {}).get(TEAM_A) or {}).get("spawns") or []
+        if not force and a_spawns:
+            # 已有池：按"只算一次"的约定直接复用
+            return True, f"reuse:{len(a_spawns)}"
+        if self.nav is None:
+            return False, "nav_missing"
+        try:
+            nav = self.nav.ensure(map_id)
+        except Exception as exc:
+            return False, f"nav_fail:{exc}"
+        pool_size = self.config_store.ffa_spawn_pool_size()
+        min_spacing = self.config_store.ffa_spawn_min_spacing()
+        spawns = compute_ffa_spawn_pool(
+            nav,
+            region_bounds(map_cfg),
+            min_spacing=min_spacing,
+            max_points=pool_size,
+        )
+        if not spawns:
+            return False, "no_nodes"
+        count = len(spawns)
+
+        def updater(entry: Dict[str, Any]) -> None:
+            mode_entry = get_mode_config(entry, "ffa")
+            if mode_entry is None:
+                return
+            teams = mode_entry.setdefault("teams", {})
+            teams[TEAM_A] = {"name": "玩家", "spawns": spawns}
+
+        self.config_store.update_map(map_id, updater)
+        self._sync_lobbies_for_map(map_id)
+        return True, f"ok:{count}"
+
+    def _handle_ffaspawn_command(self, sender: CommandSender, map_id: str) -> None:
+        """`/gs ffaspawn [map_id]`：强制重算个人死斗出生点池。"""
+        assert self.config_store is not None
+        map_id = str(map_id or "").strip()
+        if not map_id:
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
+                sender.send_message(self._t("CMD_PLAYER_ONLY"))
+                return
+            x, y, z, _yaw, _pitch, dim = _player_location_tuple(player)
+            candidates = find_maps_at_point(self.config_store.maps, x, y, z, dim)
+            if not candidates:
+                sender.send_message(self._t("SPAWN_CMD_NOT_IN_REGION"))
+                return
+            map_id = str(candidates[0].get("id") or "")
+        ok, detail = self._generate_ffa_spawn_pool(map_id, force=True)
+        display = self._map_display_name(map_id)
+        if ok and detail.startswith(("ok:", "reuse:")):
+            count = detail.split(":", 1)[1]
+            sender.send_message(self._t("FFA_SPAWN_GENERATED").format(count, display))
+        elif detail.startswith("nav_fail:") or detail == "nav_missing":
+            sender.send_message(self._t("FFA_SPAWN_NEED_NAV").format(display, map_id))
+        else:
+            sender.send_message(self._t("FFA_SPAWN_FAILED").format(display, detail))
 
     def _end_match(self, lobby: Lobby, winner: Optional[str], *, timed_out: bool = False) -> None:
         # 终局战报要在最前面发：这函数最后会把大厅从 self.lobbies 里摘掉，
@@ -2871,6 +3152,7 @@ class ARCShooterGamePlugin(Plugin):
                 score_a,
                 score_b,
                 b_name,
+                lobby=lobby,
             )
             self._schedule_match_result_form(member, result_content)
         # 赛后让假人说一句。枪战模式下它们**不主动说话**（需求文档 §1），
@@ -2899,7 +3181,19 @@ class ARCShooterGamePlugin(Plugin):
                 return
             a_name = lobby.team_name(TEAM_A)
             b_name = lobby.team_name(TEAM_B)
-            if winner is None:
+            if lobby.active_mode == "ffa":
+                # 个人死斗：winner 是玩家名，播报个人战绩
+                winner_ps = next(
+                    (p for p in lobby.result_rows() if p.name == winner), None
+                ) if winner else None
+                if winner_ps is not None:
+                    text = (f"枪战个人死斗结束：{winner_ps.name} 以 "
+                            f"{winner_ps.kills} 杀获胜。")
+                elif winner is not None:
+                    text = f"枪战个人死斗结束：{winner} 获胜。"
+                else:
+                    text = "枪战个人死斗结束：平局，无人获胜。"
+            elif winner is None:
                 text = f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，打平了。"
             else:
                 text = (f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，"
@@ -2928,8 +3222,19 @@ class ARCShooterGamePlugin(Plugin):
         score_a: int,
         score_b: int,
         b_name: str,
+        lobby: Optional[Lobby] = None,
     ) -> None:
         title = self._t("MATCH_RESULT_TOAST_TITLE")
+        if lobby is not None and lobby.active_mode == "ffa":
+            # 个人死斗：winner 是玩家名，按"是不是你"给不同 toast
+            if winner is None:
+                content = self._t("FFA_RESULT_TOAST_DRAW")
+            elif player.name == winner:
+                content = self._t("FFA_RESULT_TOAST_WIN")
+            else:
+                content = self._t("FFA_RESULT_TOAST_LOSE").format(winner)
+            self._send_toast(player, title, content)
+            return
         a_disp = self._colored_label(a_name, TEAM_A)
         b_disp = self._colored_label(b_name, TEAM_B)
         if winner is None or team is None:
@@ -2979,16 +3284,25 @@ class ARCShooterGamePlugin(Plugin):
             return rewards, mvp_names
 
         rows = lobby.result_rows()
-        for team_id in (TEAM_A, TEAM_B):
-            members = [p for p in rows if p.team == team_id]
-            mvp = pick_team_mvp(
-                members, assist_weight=assist_weight, tk_weight=tk_weight
-            )
-            if mvp is not None:
-                mvp_names.add(mvp.name)
+        if lobby.active_mode == "ffa":
+            # 个人死斗：MVP 就是获胜者本人（全员同池，不按队挑 MVP）
+            if winner is not None:
+                mvp_names.add(winner)
+        else:
+            for team_id in (TEAM_A, TEAM_B):
+                members = [p for p in rows if p.team == team_id]
+                mvp = pick_team_mvp(
+                    members, assist_weight=assist_weight, tk_weight=tk_weight
+                )
+                if mvp is not None:
+                    mvp_names.add(mvp.name)
 
         for ps in rows:
-            won = bool(winner) and ps.team == winner
+            if lobby.active_mode == "ffa":
+                # winner 是玩家名
+                won = bool(winner) and ps.name == winner
+            else:
+                won = bool(winner) and ps.team == winner
             money = calc_match_money(
                 ps.kills,
                 ps.deaths,
@@ -3056,6 +3370,11 @@ class ARCShooterGamePlugin(Plugin):
         rewards: Optional[Dict[str, Dict[str, int]]] = None,
         mvp_names: Optional[set] = None,
     ) -> str:
+        if lobby.active_mode == "ffa":
+            return self._ffa_match_result_content(
+                lobby, winner,
+                timed_out=timed_out, rewards=rewards, mvp_names=mvp_names,
+            )
         a_name = self._colored_team_name(lobby, TEAM_A)
         b_name = self._colored_team_name(lobby, TEAM_B)
         mvps = mvp_names or set()
@@ -3092,6 +3411,79 @@ class ARCShooterGamePlugin(Plugin):
                         ps.team_kills,
                     )
                 )
+        reward_map = rewards or {}
+        parts.append("")
+        parts.append(self._t("MATCH_END_REWARDS_HEADER"))
+        for ps in rows:
+            colored = self._colored_label(ps.name, ps.team)
+            if ps.name in mvps:
+                colored = self._t("MATCH_END_MVP_TAG") + colored
+            entry = reward_map.get(ps.name)
+            if entry:
+                money = int(entry.get("money", 0))
+                contribution = int(entry.get("contribution", 0))
+                if money > 0 and contribution > 0:
+                    parts.append(
+                        self._t("MATCH_END_REWARD_BOTH").format(colored, money, contribution)
+                    )
+                elif money > 0:
+                    parts.append(self._t("MATCH_END_REWARD_MONEY").format(colored, money))
+                elif contribution > 0:
+                    parts.append(self._t("MATCH_END_REWARD_CONTRIB").format(colored, contribution))
+                else:
+                    parts.append(self._t("MATCH_END_REWARD_NONE").format(colored))
+            else:
+                parts.append(self._t("MATCH_END_REWARD_NONE").format(colored))
+        return "\n".join(parts)
+
+    def _ffa_match_result_content(
+        self,
+        lobby: Lobby,
+        winner: Optional[str],
+        *,
+        timed_out: bool = False,
+        rewards: Optional[Dict[str, Dict[str, int]]] = None,
+        mvp_names: Optional[set] = None,
+    ) -> str:
+        """个人死斗结算文本：不分队，全员按击杀排名；winner 是玩家名。"""
+        mvps = mvp_names or set()
+        parts: List[str] = []
+        if timed_out:
+            parts.append(self._t("MATCH_END_TIME_NOTE"))
+        parts.append(self._t("FFA_RESULT_HEADER"))
+        winner_ps = next(
+            (p for p in lobby.result_rows() if p.name == winner), None
+        ) if winner else None
+        if winner_ps is not None:
+            parts.append(
+                self._t("MATCH_END_FFA_WINNER").format(
+                    self._colored_label(winner_ps.name, winner_ps.team),
+                    winner_ps.kills,
+                )
+            )
+        else:
+            parts.append(self._t("FFA_RESULT_DRAW_LINE"))
+        parts.append("")
+        rows = sorted(
+            lobby.result_rows(),
+            key=lambda p: (-int(p.kills), -int(p.assists), int(p.deaths), p.name),
+        )
+        for rank, ps in enumerate(rows, 1):
+            label = self._colored_label(ps.name, ps.team)
+            if ps.name in mvps:
+                label = self._t("MATCH_END_MVP_TAG") + label
+            parts.append(
+                self._t("FFA_RANK_LINE").format(
+                    rank,
+                    self._t("MATCH_END_STATS_PLAYER").format(
+                        label,
+                        ps.kills,
+                        ps.deaths,
+                        ps.assists,
+                        ps.team_kills,
+                    ),
+                )
+            )
         reward_map = rewards or {}
         parts.append("")
         parts.append(self._t("MATCH_END_REWARDS_HEADER"))
@@ -3743,8 +4135,10 @@ class ARCShooterGamePlugin(Plugin):
             self._t("LOBBY_LINE_TEAM_CAP").format(team_cap),
             "",
             self._team_block(lobby, TEAM_A),
-            self._team_block(lobby, TEAM_B),
         ]
+        if lobby.active_mode != "ffa":
+            # 个人死斗全员在红池，没有第二队可显示
+            lines.append(self._team_block(lobby, TEAM_B))
         return "\n".join(lines)
 
     def _team_block(self, lobby: Lobby, team_id: str) -> str:
@@ -4322,7 +4716,9 @@ class ARCShooterGamePlugin(Plugin):
                     on_click=lambda sender, lb=lobby: self._show_map_select(sender, lb),
                 )
                 form.add_button(self._t("BTN_START"), on_click=lambda sender, lb=lobby: self._start_match(sender, lb))
-                form.add_button(self._t("BTN_ASSIGN"), on_click=lambda sender, lb=lobby: self._show_assign_menu(sender, lb))
+                if lobby.active_mode != "ffa":
+                    # 个人死斗没有分队概念，隐藏调整分队入口
+                    form.add_button(self._t("BTN_ASSIGN"), on_click=lambda sender, lb=lobby: self._show_assign_menu(sender, lb))
                 form.add_button(self._t("BTN_KICK"), on_click=lambda sender, lb=lobby: self._show_kick_menu(sender, lb))
             form.add_button(self._t("BTN_LEAVE"), on_click=lambda sender: self._handle_leave(sender, confirm_match=False))
             form.add_button(self._t("CLOSE"), on_click=lambda sender: None)
@@ -5308,23 +5704,49 @@ class ARCShooterGamePlugin(Plugin):
 
         def updater(entry: Dict[str, Any]) -> None:
             modes = list(entry.get("modes") or [])
-            modes.append(
-                {
-                    "mode": mode,
-                    "max_players_per_team": 8,
-                    "target_score": 50,
-                    "match_time_minutes": 5,
-                    "weapon_acquire": "armory",
-                    "teams": {
-                        "a": {"name": "红队", "spawns": []},
-                        "b": {"name": "蓝队", "spawns": []},
-                    },
-                }
-            )
+            if mode == "ffa":
+                # 个人死斗：全员一队只建红池；目标击杀默认 20、武器走商店
+                modes.append(
+                    {
+                        "mode": mode,
+                        "max_players_per_team": 8,
+                        "target_score": 20,
+                        "match_time_minutes": 5,
+                        "weapon_acquire": "shop",
+                        "teams": {"a": {"name": "玩家", "spawns": []}},
+                    }
+                )
+            else:
+                modes.append(
+                    {
+                        "mode": mode,
+                        "max_players_per_team": 8,
+                        "target_score": 50,
+                        "match_time_minutes": 5,
+                        "weapon_acquire": "armory",
+                        "teams": {
+                            "a": {"name": "红队", "spawns": []},
+                            "b": {"name": "蓝队", "spawns": []},
+                        },
+                    }
+                )
             entry["modes"] = modes
 
         self.config_store.update_map(map_id, updater)
         player.send_message(self._t("ADD_MODE_OK").format(self._mode_label(mode)))
+        if mode == "ffa":
+            # 只在第一次创建死斗模式时计算出生点（最大连通域采样），
+            # 存进 shooter.db 后一直复用；之后可用 /gs ffaspawn 强制重算。
+            ok, detail = self._generate_ffa_spawn_pool(map_id, force=True)
+            display = self._map_display_name(map_id)
+            if ok and detail.startswith(("ok:", "reuse:")):
+                player.send_message(
+                    self._t("FFA_SPAWN_GENERATED").format(detail.split(":", 1)[1], display)
+                )
+            elif detail.startswith("nav_fail:") or detail == "nav_missing":
+                player.send_message(self._t("FFA_SPAWN_NEED_NAV").format(display, map_id))
+            else:
+                player.send_message(self._t("FFA_SPAWN_FAILED").format(display, detail))
         self._show_mode_edit(player, map_id, mode)
 
     def _show_add_mode_form(self, player: Player, map_id: str) -> None:
@@ -5392,14 +5814,14 @@ class ARCShooterGamePlugin(Plugin):
             self._t("BTN_EDIT_RULES"),
             on_click=lambda sender, m=map_id, md=mode: self._show_mode_settings_form(sender, m, md),
         )
-        form.add_button(
-            self._t("BTN_MANAGE_SPAWN_A"),
-            on_click=lambda sender, m=map_id, md=mode: self._show_spawn_edit(sender, m, md, TEAM_A),
-        )
-        form.add_button(
-            self._t("BTN_MANAGE_SPAWN_B"),
-            on_click=lambda sender, m=map_id, md=mode: self._show_spawn_edit(sender, m, md, TEAM_B),
-        )
+        # 个人死斗只有红池（全员一池随机复活），不显示蓝队出生点入口
+        spawn_team_ids = MODE_SPAWN_TEAMS.get(mode, ("a", "b"))
+        for team_id in spawn_team_ids:
+            btn_key = "BTN_MANAGE_SPAWN_A" if team_id == TEAM_A else "BTN_MANAGE_SPAWN_B"
+            form.add_button(
+                self._t(btn_key),
+                on_click=lambda sender, m=map_id, md=mode, t=team_id: self._show_spawn_edit(sender, m, md, t),
+            )
         form.add_button(self._t("BACK"), on_click=lambda sender, m=map_id: self._show_map_edit(sender, m))
         self._send_form(player, form)
 

@@ -1247,5 +1247,216 @@ class RangeToggleTests(unittest.TestCase):
         self.assertEqual(self.entered, [])
 
 
+class FFAModeTests(unittest.TestCase):
+    """个人死斗（ffa）：全员一队（红池）、无友伤、个人击杀达标获胜。"""
+
+    def _ffa_map(self):
+        return normalize_map(
+            {
+                "id": "arena",
+                "display_name": "竞技场",
+                "dimension": "overworld",
+                "region": {
+                    "pos1": {"x": 0, "y": 60, "z": 0},
+                    "pos2": {"x": 100, "y": 80, "z": 100},
+                },
+                "modes": [
+                    {
+                        "mode": "ffa",
+                        "max_players_per_team": 8,
+                        "target_score": 2,
+                        "match_time_minutes": 5,
+                        "weapon_acquire": "shop",
+                        "teams": {
+                            "a": {"name": "玩家", "spawns": [{"x": 5, "y": 64, "z": 5, "radius": 0}]},
+                        },
+                    }
+                ],
+            }
+        )
+
+    def _ffa_lobby(self) -> Lobby:
+        lobby = Lobby(admin="alice")
+        lobby.set_map_and_mode(self._ffa_map(), "ffa")
+        lobby.join("alice", 800, now=1)
+        lobby.join("bob", 800, now=2)
+        return lobby
+
+    def test_ffa_join_puts_everyone_in_team_a(self):
+        lobby = self._ffa_lobby()
+        self.assertEqual(lobby.players["alice"].team, TEAM_A)
+        self.assertEqual(lobby.players["bob"].team, TEAM_A)
+
+    def test_ffa_join_respects_total_cap(self):
+        lobby = Lobby(admin="alice")
+        lobby.set_map_and_mode(self._ffa_map(), "ffa")
+        lobby.map_cfg["max_players_per_team"] = 2
+        ok, _ = lobby.join("alice", 800, now=1)
+        self.assertTrue(ok)
+        ok, _ = lobby.join("bob", 800, now=2)
+        self.assertTrue(ok)
+        ok, reason = lobby.join("carol", 800, now=3)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "full")
+
+    def test_ffa_can_start_without_team_b(self):
+        lobby = self._ffa_lobby()
+        ok, reason = lobby.can_start()
+        self.assertTrue(ok, reason)
+
+    def test_ffa_can_start_needs_spawn_pool(self):
+        lobby = self._ffa_lobby()
+        lobby.map_cfg["teams"]["a"]["spawns"] = []
+        ok, reason = lobby.can_start()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "need_spawns")
+
+    def test_ffa_kill_is_never_friendly(self):
+        lobby = self._ffa_lobby()
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        result = lobby.apply_player_kill("alice", "bob", 100)
+        self.assertFalse(result["friendly"])
+        self.assertEqual(lobby.players["alice"].kills, 1)
+        self.assertEqual(lobby.players["bob"].deaths, 1)
+        self.assertIsNone(result["winner"])  # 目标 2 杀，还差一杀
+
+    def test_ffa_kill_reaching_target_wins_by_player_name(self):
+        lobby = self._ffa_lobby()
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        lobby.apply_player_kill("alice", "bob", 100)
+        result = lobby.apply_player_kill("alice", "bob", 100)
+        self.assertEqual(result["winner"], "alice")  # winner 是玩家名
+        self.assertEqual(lobby.players["alice"].points, 1000)
+
+    def test_ffa_timeout_winner_is_top_killer(self):
+        lobby = self._ffa_lobby()
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        lobby.apply_player_kill("alice", "bob", 100)
+        self.assertEqual(lobby.winner_by_score(), "alice")
+        lobby.apply_player_kill("bob", "alice", 100)
+        self.assertIsNone(lobby.winner_by_score())  # 1:1 平局
+
+    def test_ffa_remaining_winner_is_last_player(self):
+        lobby = self._ffa_lobby()
+        lobby.begin_buy(0)
+        lobby.begin_playing()
+        self.assertIsNone(lobby.remaining_winner())
+        lobby.leave("alice")
+        self.assertEqual(lobby.remaining_winner(), "bob")
+
+    def test_ffa_mode_requires_only_spawn_a(self):
+        map_cfg = self._ffa_map()
+        self.assertEqual(mode_incomplete_reasons(map_cfg, "ffa"), [])
+        self.assertTrue(mode_playable(map_cfg, "ffa"))
+        # b 队没出生点不影响 ffa
+        self.assertNotIn(
+            "reason_missing_spawn_b", mode_incomplete_reasons(map_cfg, "ffa")
+        )
+
+    def test_ffa_mode_not_playable_without_pool(self):
+        map_cfg = self._ffa_map()
+        map_cfg["modes"][0]["teams"]["a"]["spawns"] = []
+        self.assertFalse(mode_playable(map_cfg, "ffa"))
+        self.assertIn(
+            "reason_missing_spawn_a", mode_incomplete_reasons(map_cfg, "ffa")
+        )
+
+    def test_ffa_not_in_playable_modes_for_tdm_map(self):
+        # 只有 tdm 模式的图，随机开局不会抽到 ffa
+        self.assertEqual(playable_modes(sample_map()), ["tdm"])
+
+
+class FFARespawnLadderTests(unittest.TestCase):
+    """个人死斗复活选点半径梯度：配置值(10) → 5 → 3 → 1 逐档放宽，
+    全部不达标才纯随机兜底（2026-11-14 服主要求）。"""
+
+    def _make(self, enemy_pos):
+        from endstone_arc_shooter_game.arc_shooter_game_plugin import (
+            ARCShooterGamePlugin,
+        )
+        plugin = ARCShooterGamePlugin()
+        plugin._safe_log = lambda *a, **k: None
+
+        class _Loc:
+            def __init__(self, x, z):
+                self.x = x
+                self.z = z
+
+        class _Member:
+            def __init__(self, x, z):
+                self.location = _Loc(x, z)
+
+        ex, ez = enemy_pos
+        plugin._get_player = lambda name: _Member(ex, ez) if name == "Enemy" else None
+        lobby = Lobby(admin="Me")
+        lobby.join("Me", 0, now=1)
+        lobby.join("Enemy", 0, now=2)
+        return plugin, lobby
+
+    @staticmethod
+    def _spawn_at(x):
+        return {"x": float(x), "y": 64.0, "z": 0.0, "radius": 0}
+
+    def test_picks_spawn_beyond_full_radius(self):
+        plugin, lobby = self._make((0.0, 0.0))
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(12), self._spawn_at(3)], "Me")
+        self.assertEqual(got["x"], 12.0, "半径 10 内有得选就不降档")
+
+    def test_degrades_to_5(self):
+        plugin, lobby = self._make((0.0, 0.0))
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(0.5), self._spawn_at(8)], "Me")
+        self.assertEqual(got["x"], 8.0, "没有 >10 的点 → 半径 5 再找一次")
+
+    def test_degrades_to_3(self):
+        plugin, lobby = self._make((0.0, 0.0))
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(0.5), self._spawn_at(4)], "Me")
+        self.assertEqual(got["x"], 4.0, "没有 >5 的点 → 半径 3 再找一次")
+
+    def test_degrades_to_1(self):
+        plugin, lobby = self._make((0.0, 0.0))
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(0.5), self._spawn_at(2)], "Me")
+        self.assertEqual(got["x"], 2.0, "没有 >3 的点 → 半径 1 最后再找一次")
+
+    def test_falls_back_random_when_all_too_close(self):
+        plugin, lobby = self._make((0.0, 0.0))
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(0.5), self._spawn_at(0.2)], "Me")
+        self.assertIn(got["x"], (0.5, 0.2), "全贴脸 → 兜底纯随机也要复活")
+
+    def test_ladder_prefers_farther_spawn_over_closer(self):
+        # 池里 8 和 2 都在半径 10 内：梯度降到 5 时挑 8，不会拿 2 凑合
+        plugin, lobby = self._make((0.0, 0.0))
+        for _ in range(10):     # 洗牌顺序随机，多跑几遍防偶然
+            got = plugin._pick_ffa_spawn(
+                lobby, [self._spawn_at(2), self._spawn_at(8)], "Me")
+            self.assertEqual(got["x"], 8.0)
+
+    def test_distance_checked_against_every_enemy(self):
+        # 两个敌人：点必须同时离两边都达标（8 离 A 远但离 B 近 → 不行；
+        # 12 离两边都够远 → 行）
+        plugin, lobby = self._make((20.0, 0.0))
+        # 再塞一个敌人在原点附近
+        from types import SimpleNamespace
+
+        class _Member:
+            def __init__(self, x, z):
+                self.location = SimpleNamespace(x=x, z=z)
+
+        near = {"A": _Member(0.0, 0.0), "Enemy": _Member(20.0, 0.0)}
+        lobby.join("A", 0, now=3)
+        plugin._get_player = lambda name: near.get(name)
+        got = plugin._pick_ffa_spawn(
+            lobby, [self._spawn_at(8), self._spawn_at(35)], "Me")
+        self.assertEqual(got["x"], 35.0,
+                         "8 距敌 A 只有 8 格（半径 10 不达标）；35 离两边都够远 → 中选")
+
+
 if __name__ == "__main__":
     unittest.main()

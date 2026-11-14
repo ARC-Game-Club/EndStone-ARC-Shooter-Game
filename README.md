@@ -1,11 +1,19 @@
 # EndStone ARC Shooter Game / 弧光射击游戏
 
-[![版本](https://img.shields.io/badge/版本-0.4.32-blue.svg)](https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game)
+[![版本](https://img.shields.io/badge/版本-0.4.55-blue.svg)](https://github.com/ARC-Game-Club/EndStone-ARC-Shooter-Game)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
-服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
+服务器内可配置多张射击地图。目前实装 **团队死斗（TDM）** 与 **个人死斗（FFA）**，通过 `/gs` 菜单创建大厅、选择地图与模式开局。
 
 TDM 固定使用 **军械库（armory）** 配装：赛外配置 5 套预设，开局进入购买/配置窗（全员无敌、可自由跑动）后右键弧光币换装，正式开赛后收回弧光币。
+
+### 个人死斗（FFA）
+
+全员各自为战（没有队友、没有误伤），**统一发红队护甲**；先到目标击杀数（默认 20）获胜，时间到击杀最多者获胜。武器默认走**商店**（击杀赚战争点数买枪，可在模式设置里改）。
+
+复活点由**导航网格最大连通域**自动采样：第一次给地图创建 ffa 模式时，从烘焙好的 `nav/<地图>.nav.json` 里取最大连通域，按最小间距（默认 12 格）采出一池出生点（默认 64 个）存进 `shooter.db`，之后一直复用。复活时从池里随机选一个 **`FFA_SPAWN_ENEMY_RADIUS`（默认 10 格）内没有敌人** 的点；没有达标点就按半径梯度 **5 → 3 → 1** 逐档放宽再找，全贴脸才兜底纯随机。导航重烘后可用 `/gs ffaspawn [map_id]` 强制重算。
+
+
 
 ## 安装
 
@@ -35,6 +43,7 @@ plugins/ARCShooterGame/
 | `/gs leave` | 离开大厅或比赛 |
 | `/gs range` | 靶场开关：不在靶场 → 进靶场；已在靶场 → 退出靶场（恢复进入前的背包与位置） |
 | `/gs armory` | 直接打开军械库表单 |
+| `/gs ffaspawn [map_id]` | OP：强制重算个人死斗出生点池（正常只在第一次创建 ffa 模式时自动算一次） |
 | `/gs reload` | OP：重载地图、武器、设置 |
 | `/gs report [start\|end\|all] [on\|off]` | OP：查/切往 QQ 群发的开关。不带参数 = 看状态；`start` = 开局播报（房间创建），`end` = 终局战报，`all` = 总开关。**立即生效**，并写回 `settings.yml`（重启后仍然有效） |
 | `/addspawn <模式> [队伍]` | OP：把脚下位置加为所在地图的出生点（红蓝队模式带队伍 red/blue/红/蓝，可简写 `/addspawn red`；个人死斗 `/addspawn ffa`） |
@@ -98,8 +107,8 @@ OP 用 `/setrange pos1`、`/setrange pos2` 圈出靶场范围，站在希望玩�
 
 1. 创建地图（输入名称）
 2. 站在角落点按钮 **设为角点1 / 角点2** 划定 XYZ 区域
-3. **添加游戏模式**（目前仅团队死斗可实装；TDM 固定 `weapon_acquire=armory`）
-4. 进入模式配置：规则（分数 / 人数 / 时长）与红/蓝队复活点
+3. **添加游戏模式**：团队死斗（固定 `weapon_acquire=armory`）或个人死斗（默认 `shop`、目标 20 杀）。**添加个人死斗的瞬间**会自动从导航网格最大连通域采样出生点池并存库——所以先给这张图 `/gs bake` 过
+4. 进入模式配置：规则（分数 / 人数 / 时长）与复活点（个人死斗只有红池一个入口；也可用 `/addspawn ffa` 手动补点）
 
 存量 TDM 地图在启动 / `/gs reload` 时会强制纠正为 `armory`。
 
@@ -145,6 +154,9 @@ QQ_REPORT_END=1
 | `XP_*` / `MAX_LEVEL` | 生涯经验与等级；MVP 额外经验为 `队伍人数 × XP_MVP_PER_TEAMMATE` |
 | `BUY_TIME_SECONDS` | 开局购买/配置窗时长（无敌 + 弧光币换装） |
 | `TEAM_A_DEFAULT_ARMOR` / `TEAM_B_DEFAULT_ARMOR` | 按队色开局自动发放的默认护甲（JSON 嵌套：头盔/胸甲/护腿） |
+| `FFA_SPAWN_ENEMY_RADIUS` | 个人死斗复活点与敌人的最小水平距离（默认 10 格） |
+| `FFA_SPAWN_POOL_SIZE` | 个人死斗出生点池规模（首次创建模式时采样，默认 64 个点） |
+| `FFA_SPAWN_MIN_SPACING` | 出生点池内点的最小水平间距（默认 12 格） |
 | `QQ_REPORT_ENABLED` | 战报总开关：`1` 开、`0` 关 |
 | `QQ_REPORT_START` | 开赛时往 QQ 群发一条**开局播报**（= 房间创建播报：地图/模式/两边名单/目标分） |
 | `QQ_REPORT_END` | 终局往 QQ 群发一条**战报**（比分 + 每人击杀/死亡/助攻） |
@@ -191,6 +203,21 @@ python -m unittest tests.test_logic # 只跑逻辑测试
 `tests/test_logic.py` 导入时自动把 `src/` 挂上 `sys.path`，**不需要设 PYTHONPATH**。
 
 ## 更新日志
+
+### v0.4.55
+
+- **个人死斗（FFA）实装**：全员自成一路进红池（统一红队护甲/红名牌），没有队友、没有误伤；先到目标击杀数（新图默认 20）获胜，时间到击杀最多者获胜（并列算平局），对局中只剩 1 人时其直接获胜。武器获取默认 `shop`（可在模式设置改）
+  - **出生点池 = 导航网格最大连通域采样**：第一次给地图创建 ffa 模式时，从烘焙好的 `nav/<地图>.nav.json` 里取最大连通域，按 `FFA_SPAWN_MIN_SPACING`（默认 12 格）间距采 `FFA_SPAWN_POOL_SIZE`（默认 64）个点，存进 `shooter.db` 的 `map_spawns`（mode=ffa, team=a）后一直复用；OP 仍可用 `/addspawn ffa` 增删。`/gs ffaspawn [map_id]` 强制重算（导航重烘后用）
+  - **复活选点半径梯度**：配置半径（`FFA_SPAWN_ENEMY_RADIUS`，默认 10 格）内无敌人的点优先；没有达标点 → 5 → 3 → 1 逐档放宽再找，全贴脸才纯随机兜底
+  - **结算链路按玩家名**：MVP=获胜者本人、胜场奖只给获胜者、结算表单/QQ 战报/假人赛后台词均按个人击杀排名展示（`qq_report` 带 ffa 分支，不分队）；个人死斗里打过来的人都算助攻（无 TK 概念）
+  - **大厅/编辑 UI**：ffa 大厅只显示一个玩家池、隐藏"调整分队"；模式编辑里 ffa 只有红池出生点入口；开局 title 改「个人死斗 · 先到 N 杀获胜」
+  - 新增 `nav/spawns.py`（采样纯逻辑）+ `tests/test_ffa_spawns.py`（6 项）+ `test_logic.py` FFAModeTests（11 项）/ FFARespawnLadderTests（7 项）
+- **假人调度三件套**（配合假人插件 4.4.16）：
+  - **在线配额动态化**：每 60s（`BOT_BALANCE_INTERVAL_SECONDS`）按「地图规模（可玩地图数×2）+ 等待大厅数」算出在线 AI 需求，推给假人插件（`api_shooter_online_quota`，保底语义不压正常曲线）——settings：`BOT_ONLINE_BASE=2` / `BOT_ONLINE_PER_LOBBY=2` / `BOT_ONLINE_MAX=10`
+  - **AI 群体最多自建一间大厅**：已有"纯 AI 等待房"时假人 quick 不再建房（真人不受限；bake 模式指定图建房不受限），避免 AI 房占满可玩地图
+  - **巡检迁移支援**：真人建的等待大厅缺人（未人齐、可加入）→ 请假人插件（`api_shooter_assist`）挪 1 个 AI 过去：优先空闲 AI，兜底从等待室挪（对局中的绝不挪）；挪完人齐则提醒房主可开局（开局权仍归房主）
+- 修 `_maybe_fill_with_bots` 在 ffa 房按 `max_per_team × 2` 双倍要人的问题（ffa 的 max_per_team 就是总上限）
+- 新增 `tests/test_bot_balance.py`（16 项）：配额公式 / 巡检选房 / quick 建房拦截
 
 ### v0.4.54
 

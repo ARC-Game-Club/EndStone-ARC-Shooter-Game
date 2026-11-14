@@ -79,6 +79,27 @@ def apply_kill(
     }
 
 
+def apply_ffa_kill(
+    kills: int,
+    target_score: int,
+    kill_reward: int,
+    killer_points: int,
+) -> Dict[str, Any]:
+    """个人死斗击杀结算：没有队友，不存在友伤；个人击杀数达 target 即达标。
+
+    winner（谁获胜）由调用方用玩家名拼——这里只做计数与达标判断。
+    """
+    reward = max(0, int(kill_reward))
+    kills += 1
+    points = killer_points + reward
+    return {
+        "kills": kills,
+        "killer_points": points,
+        "reward": reward,
+        "hit_target": kills >= target_score,
+    }
+
+
 def first_empty_or_first(occupied: List[Optional[str]], capacity: int) -> int:
     if capacity <= 0:
         return 0
@@ -86,6 +107,59 @@ def first_empty_or_first(occupied: List[Optional[str]], capacity: int) -> int:
         if i >= len(occupied) or not occupied[i]:
             return i
     return 0
+
+
+def compute_bot_online_quota(
+    waiting_lobbies: int,
+    playable_maps: int,
+    *,
+    base: int,
+    per_lobby: int,
+    hard_max: int,
+) -> int:
+    """假人在线配额：以地图规模（可玩地图数）和等待中大厅数决定。
+
+    公式：clamp(base + per_lobby×等待房数, base, min(hard_max, max(base, 地图数×2)))。
+    大厅数本就 ≤ 可玩地图数，地图数×2 是"每张图一间房、每间至少两人"的
+    天花板；下限 base 保证 AI 自建房一直有人能开局。
+    """
+    base = max(0, int(base))
+    per_lobby = max(0, int(per_lobby))
+    hard_max = max(1, int(hard_max))
+    ceiling = min(hard_max, max(base, max(0, int(playable_maps)) * 2))
+    return max(base, min(base + per_lobby * max(0, int(waiting_lobbies)), ceiling))
+
+
+def pick_assist_lobby(lobbies_desc: List[Dict[str, Any]]) -> Optional[str]:
+    """60s 巡检选目标：真人建的、还在等待/倒计时、没满、人还没齐的大厅里
+    挑 lobby_started_at 最早（等得最久）的那间；None = 无需迁移。
+
+    lobbies_desc 每项：{lobby_id, started_at, has_human, waiting, joinable,
+    ready}——由插件侧统计填充（has_human=场上有真人；waiting=LOBBY/
+    COUNTDOWN；joinable=can_join()；ready=teams_ready_to_start()）。
+    """
+    best_id: Optional[str] = None
+    best_key: Optional[Tuple[float, str]] = None
+    for d in lobbies_desc:
+        if not (
+            d.get("has_human")
+            and d.get("waiting")
+            and d.get("joinable")
+            and not d.get("ready")
+        ):
+            continue
+        try:
+            started = float(d.get("started_at") or 0.0)
+        except (TypeError, ValueError):
+            started = 0.0
+        lobby_id = str(d.get("lobby_id") or "")
+        if not lobby_id:
+            continue
+        key = (started, lobby_id)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_id = lobby_id
+    return best_id
 
 
 @dataclass
@@ -184,6 +258,9 @@ class Lobby:
         return len(self.online_players())
 
     def pick_join_team(self) -> Optional[str]:
+        if self.active_mode == "ffa":
+            # 个人死斗：全员进红池，max_players_per_team 此时是总人数上限
+            return TEAM_A if self.team_count(TEAM_A) < self.max_per_team else None
         a = self.team_count(TEAM_A)
         b = self.team_count(TEAM_B)
         cap = self.max_per_team
@@ -289,6 +366,11 @@ class Lobby:
             return False, "need_map"
         if self.player_count() < 2:
             return False, "need_players"
+        if self.active_mode == "ffa":
+            # 个人死斗：没有第二队，只看人数与红池出生点
+            if has_map and not self.team_spawns(TEAM_A):
+                return False, "need_spawns"
+            return True, "ok"
         if self.team_count(TEAM_A) == 0 or self.team_count(TEAM_B) == 0:
             return False, "need_players"
         if has_map:
@@ -358,6 +440,8 @@ class Lobby:
         return True
 
     def teams_ready_to_start(self) -> bool:
+        if self.active_mode == "ffa":
+            return self.player_count() >= 2
         return (
             self.player_count() >= 2
             and self.team_count(TEAM_A) > 0
@@ -365,6 +449,16 @@ class Lobby:
         )
 
     def winner_by_score(self) -> Optional[str]:
+        if self.active_mode == "ffa":
+            # 个人死斗：击杀最多者获胜（winner 是玩家名）；并列 → 平局
+            rows = self.result_rows()
+            if not rows:
+                return None
+            top = max(int(ps.kills) for ps in rows)
+            leaders = [ps for ps in rows if int(ps.kills) == top]
+            if len(leaders) != 1:
+                return None
+            return leaders[0].name
         if self.score_a > self.score_b:
             return TEAM_A
         if self.score_b > self.score_a:
@@ -380,6 +474,28 @@ class Lobby:
             return None
         if self.state not in (STATE_BUYING, STATE_PLAYING):
             return None
+        if self.active_mode == "ffa":
+            # 个人死斗：谁都不算队友，击杀永远非友伤；score_a 只作总击杀展示
+            ffa = apply_ffa_kill(
+                killer.kills,
+                self.target_score,
+                kill_reward,
+                killer.points,
+            )
+            killer.kills = ffa["kills"]
+            killer.points = ffa["killer_points"]
+            victim.deaths += 1
+            self.score_a += 1
+            return {
+                "score_a": self.score_a,
+                "score_b": self.score_b,
+                "killer_points": killer.points,
+                "reward": ffa["reward"],
+                "friendly": False,
+                "winner": killer.name if ffa["hit_target"] else None,
+                "killer": killer,
+                "victim": victim,
+            }
         result = apply_kill(
             self.score_a,
             self.score_b,
@@ -415,6 +531,10 @@ class Lobby:
         ps.team_kills += 1
 
     def remaining_winner(self) -> Optional[str]:
+        if self.active_mode == "ffa":
+            # 个人死斗：全场只剩 1 人 → 他获胜（winner 是玩家名）
+            online = self.online_players()
+            return online[0].name if len(online) == 1 else None
         a = self.team_count(TEAM_A)
         b = self.team_count(TEAM_B)
         if a == 0 and b == 0:

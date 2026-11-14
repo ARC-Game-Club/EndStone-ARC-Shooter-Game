@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from endstone_arc_shooter_game.inventory import normalize_armor_item_info
 from endstone_arc_shooter_game.language import PLUGIN_DATA_DIR
 
-IMPLEMENTED_MODES = {"tdm"}
+IMPLEMENTED_MODES = {"tdm", "ffa"}
 KNOWN_MODES = ("tdm", "ffa", "ctf")
 # 各模式的出生点队伍结构：红蓝队模式为 ("a","b")；无队伍模式为空元组（出生点统一进 a 池）。
 MODE_SPAWN_TEAMS: Dict[str, Tuple[str, ...]] = {
@@ -111,6 +111,22 @@ DEFAULT_SETTINGS = {
     "QQ_REPORT_ENABLED": "1",
     "QQ_REPORT_START": "1",
     "QQ_REPORT_END": "1",
+    # === 2026-11-14 个人死斗（ffa）===
+    # 复活点在最大连通域出生点池里随机选，且与所有敌人保持以下水平距离。
+    "FFA_SPAWN_ENEMY_RADIUS": "10",
+    # 出生点池规模（首次给地图创建 ffa 模式时从导航网格采样，之后一直复用）。
+    "FFA_SPAWN_POOL_SIZE": "64",
+    # 池内点之间的最小水平间距（格），保证随机复活有得挑。
+    "FFA_SPAWN_MIN_SPACING": "12",
+    # === 2026-11-14 假人调度（在线配额 + 单房限制 + 巡检迁移）===
+    # 巡检周期：真人房缺人时挪 AI 过去帮忙开局。
+    "BOT_BALANCE_INTERVAL_SECONDS": "60",
+    # 假人在线数基本盘（维持 AI 自建房一间能开局）。
+    "BOT_ONLINE_BASE": "2",
+    # 每间等待中的大厅追加的在线名额。
+    "BOT_ONLINE_PER_LOBBY": "2",
+    # 在线假人数绝对上限（另受可玩地图数 ×2 封顶）。
+    "BOT_ONLINE_MAX": "10",
 }
 
 DEFAULT_MAPS = {
@@ -784,9 +800,23 @@ def get_mode_config(map_cfg: Dict[str, Any], mode: str) -> Optional[Dict[str, An
     return None
 
 
+def required_spawn_teams(mode: str) -> Tuple[str, ...]:
+    """该模式开局必须有出生点的队伍。
+
+    注意和 MODE_SPAWN_TEAMS 语义不同：那边是"出生点带不带队伍标签"
+    （ffa 为 ()，点位统一进 a 池）；这里是"可玩性要求哪个池非空"——
+    ffa 无分队，但 a 池就是全员出生点池，必须非空。
+    """
+    mode_key = str(mode or "").strip().lower()
+    if mode_key == "ffa":
+        return ("a",)
+    return ("a", "b")
+
+
 def mode_has_spawns(mode_cfg: Dict[str, Any]) -> bool:
+    mode = str(mode_cfg.get("mode") or "").lower()
     teams = mode_cfg.get("teams") or {}
-    for team_id in ("a", "b"):
+    for team_id in required_spawn_teams(mode):
         team = teams.get(team_id) or {}
         spawns = team.get("spawns") or []
         if not spawns:
@@ -808,11 +838,12 @@ def mode_incomplete_reasons(map_cfg: Dict[str, Any], mode: str) -> List[str]:
         reasons.append("reason_mode_not_found")
         return reasons
     teams = mode_cfg.get("teams") or {}
-    for team_id, code in (("a", "reason_missing_spawn_a"), ("b", "reason_missing_spawn_b")):
+    spawn_codes = {"a": "reason_missing_spawn_a", "b": "reason_missing_spawn_b"}
+    for team_id in required_spawn_teams(mode_key):
         team = teams.get(team_id) or {}
         spawns = team.get("spawns") or []
         if not spawns:
-            reasons.append(code)
+            reasons.append(spawn_codes.get(team_id, f"reason_missing_spawn_{team_id}"))
     return reasons
 
 
@@ -1510,6 +1541,34 @@ class ConfigStore:
     def start_countdown(self) -> int:
         """开赛前传送倒计时秒数（title 倒数）。"""
         return max(1, self.settings.GetSettingInt("START_COUNTDOWN_SECONDS", 5))
+
+    def ffa_spawn_enemy_radius(self) -> float:
+        """个人死斗复活点与敌人的最小水平距离（格）。"""
+        return max(1.0, self.settings.GetSettingFloat("FFA_SPAWN_ENEMY_RADIUS", 10.0))
+
+    def ffa_spawn_pool_size(self) -> int:
+        """个人死斗出生点池规模（首次创建模式时采样，之后复用）。"""
+        return max(8, self.settings.GetSettingInt("FFA_SPAWN_POOL_SIZE", 64))
+
+    def ffa_spawn_min_spacing(self) -> float:
+        """个人死斗出生点池内点的最小水平间距（格）。"""
+        return max(2.0, self.settings.GetSettingFloat("FFA_SPAWN_MIN_SPACING", 12.0))
+
+    def bot_balance_interval(self) -> int:
+        """假人调度巡检周期（秒）。"""
+        return max(10, self.settings.GetSettingInt("BOT_BALANCE_INTERVAL_SECONDS", 60))
+
+    def bot_online_base(self) -> int:
+        """假人在线数基本盘（维持 AI 自建房）。"""
+        return max(0, self.settings.GetSettingInt("BOT_ONLINE_BASE", 2))
+
+    def bot_online_per_lobby(self) -> int:
+        """每间等待中大厅追加的假人在线名额。"""
+        return max(0, self.settings.GetSettingInt("BOT_ONLINE_PER_LOBBY", 2))
+
+    def bot_online_max(self) -> int:
+        """假人在线数绝对上限。"""
+        return max(1, self.settings.GetSettingInt("BOT_ONLINE_MAX", 10))
 
     def match_time(self) -> int:
         """全局默认比赛秒数（仅作兜底；实际以各地图模式的 match_time_minutes 为准）。"""

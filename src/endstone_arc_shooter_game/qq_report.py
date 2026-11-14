@@ -124,11 +124,31 @@ def _stat_line(ps: Any) -> str:
     return text
 
 
+def _is_ffa(lobby: Any) -> bool:
+    return str(_attr(lobby, "active_mode", "") or "") == "ffa"
+
+
 def build_start_report(lobby: Any, *, map_label: str = "",
                        mode_label: str = "") -> str:
     """开局播报：地图、模式、两边名单、目标分与限时。"""
     map_label = map_label or str(_attr(lobby, "display_name", "") or "未知地图")
     mode_label = mode_label or str(_attr(lobby, "active_mode", "") or "")
+    target = _int(_attr(lobby, "target_score", 0))
+    minutes = _int(_attr(lobby, "match_time_minutes", 0))
+    if _is_ffa(lobby):
+        # 个人死斗：全员混战，只列一份名单
+        players = [str(_attr(p, "name", "")) for p in _online(lobby)]
+        lines = [
+            "🏁 弧光枪战 · 开局",
+            "地图：{0} · 模式：{1}".format(map_label, mode_label),
+            "🔴 {0}：{1}".format(
+                team_name(lobby, TEAM_A),
+                "、".join(players) if players else "（无）"),
+            "各自为战，先到 {0} 杀获胜".format(target) if target else "各自为战",
+        ]
+        if minutes:
+            lines.append("限时 {0} 分钟".format(minutes))
+        return "\n".join(lines)
     a_name = team_name(lobby, TEAM_A)
     b_name = team_name(lobby, TEAM_B)
     a_players = [str(_attr(p, "name", "")) for p in _online(lobby)
@@ -145,8 +165,6 @@ def build_start_report(lobby: Any, *, map_label: str = "",
             _ICON[TEAM_B], b_name,
             "、".join(b_players) if b_players else "（无）"),
     ]
-    target = _int(_attr(lobby, "target_score", 0))
-    minutes = _int(_attr(lobby, "match_time_minutes", 0))
     if target or minutes:
         lines.append("目标 {0} 分 · 限时 {1} 分钟".format(target, minutes))
     return "\n".join(lines)
@@ -156,6 +174,31 @@ def build_end_report(lobby: Any, winner: Optional[str], *,
                      timed_out: bool = False, map_label: str = "") -> str:
     """终局战报：比分、结果、两队每人 击杀/死亡/助攻。"""
     map_label = map_label or str(_attr(lobby, "display_name", "") or "未知地图")
+    if _is_ffa(lobby):
+        # 个人死斗：winner 是玩家名；全员按击杀排名
+        rows = sorted(_rows(lobby), key=_sort_key)
+        winner_ps = next(
+            (ps for ps in rows if str(_attr(ps, "name", "")) == str(winner or "")),
+            None,
+        ) if winner else None
+        result = (
+            "{0} 以 {1} 杀获胜".format(
+                str(_attr(winner_ps, "name", winner)),
+                _int(_attr(winner_ps, "kills", 0)),
+            )
+            if winner_ps is not None
+            else (str(winner) + " 获胜" if winner else "平局")
+        )
+        if timed_out:
+            result = "时间到 · " + result
+        lines = [
+            "🏁 弧光枪战 · 战报",
+            "地图：{0}".format(map_label),
+            "结果：{0}".format(result),
+            "战绩（击杀/死亡/助攻）：",
+            "、".join(_stat_line(ps) for ps in rows) if rows else "（无）",
+        ]
+        return "\n".join(lines)
     a_name = team_name(lobby, TEAM_A)
     b_name = team_name(lobby, TEAM_B)
     score_a = _int(_attr(lobby, "score_a", 0))

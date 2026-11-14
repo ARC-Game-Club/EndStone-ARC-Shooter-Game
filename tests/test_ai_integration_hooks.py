@@ -69,6 +69,7 @@ class _Player:
     def __init__(self, name, xuid=""):
         self.name = name
         self.xuid = xuid
+        self.kills = 0  # 个人死斗结算文案要读
 
 
 class _FakeAfp:
@@ -114,16 +115,27 @@ class _Server:
 class _FakeLobby:
     """够用的大厅替身：只提供被测方法用到的那几个成员。"""
 
-    def __init__(self, lobby_id="L1", names=("bot1", "bot2"), winner=None):
+    def __init__(self, lobby_id="L1", names=("bot1", "bot2"), winner=None,
+                 mode="tdm"):
         self.lobby_id = lobby_id
         self._names = list(names)
         self._winner = winner
+        self._mode = mode
+
+    @property
+    def active_mode(self):
+        # 2026-11-14 起 _notify_match_settlement 按模式分支文案
+        return self._mode
 
     def team_name(self, team_id):
         return "红队" if team_id == "A" else "蓝队"
 
     def result_rows(self):
-        return [_Player(n) for n in self._names]
+        # 缓存同一批对象：真实 Lobby 的 result_rows 每次返回同一批
+        # PlayerState，调用方设置的 kills 在下次读取时仍可见
+        if getattr(self, "_rows", None) is None:
+            self._rows = [_Player(n) for n in self._names]
+        return list(self._rows)
 
 
 def _make_plugin(afp=None):
@@ -220,6 +232,21 @@ class MatchSettlementHookTests(unittest.TestCase):
         plug = _make_plugin(afp)
         plug._notify_match_settlement(_FakeLobby(), None, 1, 1)
         self.assertEqual(afp.event_calls, [])
+
+    def test_ffa_winner_text_mentions_player_name(self):
+        """个人死斗：winner 是玩家名，播报"xx 以 N 杀获胜"。"""
+        afp = _FakeAfp()
+        plug = _make_plugin(afp)
+        lobby = _FakeLobby(names=("bot1", "bot2"), mode="ffa")
+        rows = lobby.result_rows()
+        rows[0].kills = 12
+        plug._notify_match_settlement(lobby, "bot1", 12, 0)
+        self.assertEqual(len(afp.event_calls), 2)
+        for _name, text, settlement in afp.event_calls:
+            self.assertTrue(settlement)
+            self.assertIn("bot1", text)
+            self.assertIn("12", text)
+            self.assertIn("个人死斗", text)
 
 
 class HookWiringTests(unittest.TestCase):
