@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -23,6 +24,26 @@ from .graph import build_graph, label_components
 from .standable import all_standables
 
 NAV_FORMAT = "nav-v1"
+
+# ---------------------------------------------------------------------------
+# 路径多样性（服主 2026-11-18："哪怕有多条支路，AI 只会走最短路径去干架"）
+#
+# A* 是确定性的：同起点同终点永远同一条路，全场 AI 挤同一条走廊。
+# 两个旋钮（改完不用重启世界，只影响后续查询）：
+#
+# ① NAV_JITTER——每条边代价 × Uniform(1, 1+JITTER)：每次请求的路径
+#    略有不同，等效于"同一张图上的随机最优"。0.25 对 10 格的路最多
+#    绕 2.5 格的等效距离，肉眼仍是"合理的路"。
+# ② NAV_HEAT——"拥堵热度"：别人 15 秒内走过的中途节点加价，后面的
+#    AI 自动换支路；走廊冷却后自动变回可行。惩罚 8.0/节点 意味着
+#    只要存在长度差 ≤8 格的替代支路就一定换道。热度按请求者记名：
+#    自己的热度对自己不可见（RTC 滚动重规划时不会绕开自己正在走的
+#    路，避免走位发酒疯），只挡别人。
+# ---------------------------------------------------------------------------
+NAV_JITTER = 0.25
+NAV_HEAT_PENALTY = 8.0
+NAV_HEAT_TTL = 15.0
+_NAV_SQRT2 = 2.0 ** 0.5
 
 
 class _LoadedNav:
@@ -64,6 +85,8 @@ class NavService:
         self._bundled_dir = Path(bundled_dir) if bundled_dir else None
         self._cache: Dict[str, _LoadedNav] = {}
         self._failed: Dict[str, str] = {}
+        #: map_id → {节点下标: (标记时刻, 请求者名)}——拥堵热度
+        self._heat: Dict[str, Dict[int, tuple]] = {}
 
     # ------------------------------------------------------------------
     # 装填 / 烘焙
@@ -267,9 +290,12 @@ class NavService:
                 best_key, best = key, i
         return best
 
-    def query(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
+    def query(self, map_id: Optional[str], start, goal,
+              requester: str = "") -> Dict[str, Any]:
         """A* 查询。map_id 为 None 时不定位（调用方自己解析好再传）。
 
+        ``requester`` 是发起请求的假人名：热度按请求者记名，自己的热度
+        对自己不可见（RTC 重规划不绕自己正在走的路），只挡别人。
         返回 {"ok", "text", "path": [[x,y,z],...]}（api_* 约定）。
         """
         try:
@@ -289,16 +315,69 @@ class NavService:
                         "snap_to": list(nav.nodes[near]), "path": []}
             if t is None:
                 return {"ok": False, "text": f"api_request_path: 终点 {goal} 附近无站立点", "path": []}
-            path = astar(nav, s, t)
+            now = time.monotonic()
+            heat = self._heat.setdefault(map_id, {})
+            path = astar(
+                nav, s, t,
+                cost_scale=self._make_scale(nav),
+                node_penalty=self._make_penalty(heat, now, requester),
+            )
             if path is None:
                 return {"ok": False,
                         "text": f"api_request_path: {nav.nodes[s]} → {nav.nodes[t]} 不可达"
                                 f"（分量断开或只有单向跳崖边）",
                         "path": []}
+            self._stamp_heat(heat, path, now, requester)
             return {"ok": True, "text": f"{len(path)} 路径点",
                     "path": [list(nav.nodes[i]) for i in path]}
         except Exception as exc:
             return {"ok": False, "text": f"api_request_path: {exc}", "path": []}
+
+    # -- 路径多样性（抖动 + 拥堵热度） --------------------------------
+
+    @staticmethod
+    def _base_step(nav: "_LoadedNav", a: int, b: int) -> float:
+        ax, _, az = nav.nodes[a]
+        bx, _, bz = nav.nodes[b]
+        return _NAV_SQRT2 if (ax != bx and az != bz) else 1.0
+
+    def _make_scale(self, nav: "_LoadedNav"):
+        rng = random.Random()
+
+        def scale(a: int, b: int) -> float:
+            return self._base_step(nav, a, b) * (1.0 + rng.uniform(0.0, NAV_JITTER))
+        return scale
+
+    def _make_penalty(self, heat: Dict[int, tuple], now: float,
+                      requester: str):
+        def penalty(n: int) -> float:
+            hit = heat.get(n)
+            if hit is None:
+                return 0.0
+            t, who = hit
+            if who == requester:
+                return 0.0            # 自己的热度对自己不可见
+            age = now - t
+            if age >= NAV_HEAT_TTL:
+                heat.pop(n, None)
+                return 0.0
+            return NAV_HEAT_PENALTY * (1.0 - age / NAV_HEAT_TTL)
+        return penalty
+
+    def _stamp_heat(self, heat: Dict[int, tuple],
+                    path: List[int], now: float, requester: str) -> None:
+        # 中途节点记热度：起点是自己站的、终点是目标，都不算"路过"
+        for n in path[1:-1]:
+            heat[n] = (now, requester)
+        self._prune_heat(heat, now)
+
+    def _prune_heat(self, heat: Dict[int, tuple], now: float) -> None:
+        if len(heat) <= 4000:
+            return
+        stale = [k for k, (t, _w) in heat.items()
+                 if now - t >= NAV_HEAT_TTL]
+        for k in stale:
+            heat.pop(k, None)
 
     def status(self, map_id: Optional[str] = None) -> Dict[str, Any]:
         """api_nav_status：烘焙状态与统计。"""

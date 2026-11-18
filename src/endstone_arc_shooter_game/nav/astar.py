@@ -23,8 +23,19 @@ def _octile(dx: int, dz: int) -> float:
 
 
 def astar(graph: NavGraph, start: int, goal: int,
-          max_expansions: int = 200_000) -> Optional[List[int]]:
-    """节点下标最短路。返回路径节点序列（含首尾）；不可达/超预算返回 None。"""
+          max_expansions: int = 200_000, *,
+          cost_scale=None, node_penalty=None) -> Optional[List[int]]:
+    """节点下标最短路。返回路径节点序列（含首尾）；不可达/超预算返回 None。
+
+    路径多样性的两个钩子（都不填 = 原版确定性最短路，行为不变）：
+
+    * ``cost_scale(cur, nxt) -> float``——边代价倍率。倍率 ≥1 时不破坏
+      可采纳性（octile 启发仍低估），只是结果"不一定是绝对最短"。
+      NavService 用它做每请求随机抖动：同起点同终点不再永远同一条路。
+    * ``node_penalty(nxt) -> float``——进入该节点的附加代价（≥0）。
+      NavService 用它做拥堵热度：别人刚走过的走廊加价，后面的 AI
+      自动换支路。
+    """
     n = len(graph.nodes)
     if not (0 <= start < n and 0 <= goal < n):
         return None
@@ -61,8 +72,10 @@ def astar(graph: NavGraph, start: int, goal: int,
             if closed[nxt]:
                 continue
             nx, _, nz = graph.nodes[nxt]
-            step = _SQRT2 if (nx != cx and nz != cz) else 1.0
-            ng = g[cur] + step
+            step = (cost_scale(cur, nxt) if cost_scale is not None
+                    else (_SQRT2 if (nx != cx and nz != cz) else 1.0))
+            ng = g[cur] + step + (node_penalty(nxt) if node_penalty is not None
+                                  else 0.0)
             if ng < g[nxt]:
                 g[nxt] = ng
                 came[nxt] = cur

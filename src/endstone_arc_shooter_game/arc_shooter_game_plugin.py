@@ -1415,11 +1415,14 @@ class ARCShooterGamePlugin(Plugin):
         if added:
             self._safe_log("info", f"[ARCShooterGame] 战场常加载已建立 {added} 块")
 
-    def api_request_path(self, map_id: Optional[str], start, goal) -> Dict[str, Any]:
+    def api_request_path(self, map_id: Optional[str], start, goal,
+                         requester: str = "") -> Dict[str, Any]:
         """给其他插件（AI 假人）调用的烘焙导航寻路。
 
         主线程调用。``map_id`` 传空串/None 时按起点坐标自动定位地图。
         start/goal 接受 (x, y, z) 或 (x, y, z, dimension)。
+        ``requester`` 是发起请求的假人名（路径多样性：拥堵热度按请求者
+        记名，自己的热度对自己不可见，只挡别人）。
         返回 {"ok", "text", "path": [[x,y,z], ...]}（不可达时 path 空）。
         """
         try:
@@ -1447,7 +1450,7 @@ class ARCShooterGamePlugin(Plugin):
                                     f"{float(start[2]):.0f}) 不在任何已导出的地图里"
                                     f"（维度 {dim}）",
                             "path": []}
-            return self.nav.query(mid, start, goal)
+            return self.nav.query(mid, start, goal, requester)
         except Exception as exc:
             return {"ok": False, "text": f"api_request_path: {exc}", "path": []}
 
