@@ -557,6 +557,8 @@ class ARCShooterGamePlugin(Plugin):
             if map_cfg is None or not playable_modes(map_cfg):
                 return False, "not_ready"
             ok, reason = lobby.set_map_and_mode(map_cfg, lobby.mode)
+            if ok:
+                self._merge_ffa_teams(lobby)
             return ok, reason if not ok else "ok"
 
         if not free:
@@ -574,7 +576,37 @@ class ARCShooterGamePlugin(Plugin):
         else:
             mode = random.choice(modes)
         ok, reason = lobby.set_map_and_mode(map_cfg, mode)
+        if ok:
+            self._merge_ffa_teams(lobby)
         return ok, reason if not ok else "ok"
+
+    def _merge_ffa_teams(self, lobby: Lobby) -> None:
+        """个人死斗（ffa）：选定模式后把全员并进 A 池。
+
+        为什么必须并：机器人在**大厅阶段**就分好队了——那时模式还没定，
+        ``active_mode`` 是空串，走的是"红蓝平衡分队"那条分支。模式定成
+        ffa 之后如果不并队，个人死斗会**长得跟团队死斗一模一样**：
+
+          · B 队没有出生点（ffa 的点位全在 A 池），``_tp_to_team_spawn``
+            拿不到 spawns 直接 return → 那半边人不会被传送；
+          · ``api_lobby_info`` 的"敌人"是按队伍不同算的 → 每个人只把
+            一半人当敌人，同队的人反倒成了"队友"，照样不打自己人。
+
+        服主的原话是"怎么看着还是红蓝团队死斗"——根因就在这儿。
+        """
+        if lobby.active_mode != "ffa":
+            return
+        moved = 0
+        for ps in lobby.players.values():
+            if ps.team != TEAM_A:
+                ps.team = TEAM_A
+                moved += 1
+        if moved:
+            self._safe_log(
+                "info",
+                f"[ARCShooterGame] 个人死斗：{moved} 人并入 A 池"
+                f"（房间 {lobby.lobby_id}，全员互为敌人）",
+            )
 
     def _get_player(self, name: str) -> Optional[Player]:
         getter = getattr(self.server, "get_player", None)
@@ -866,8 +898,15 @@ class ARCShooterGamePlugin(Plugin):
                 return {"ok": False, "text": "不在房间"}
             ps = lobby.players.get(name)
             my_team = str(getattr(ps, "team", "") or "")
-            enemies = [str(p.name) for p in lobby.online_players()
-                       if str(getattr(p, "team", "")) != my_team]
+            if lobby.active_mode == "ffa":
+                # 个人死斗没有队友：除自己以外全是敌人。
+                # （正常路径下 _merge_ffa_teams 已把全员并进 A 池，这里是
+                # 兜底——万一有人漏并，也不能让 AI 把同队的人当队友。）
+                enemies = [str(p.name) for p in lobby.online_players()
+                           if str(p.name) != name]
+            else:
+                enemies = [str(p.name) for p in lobby.online_players()
+                           if str(getattr(p, "team", "")) != my_team]
             return {
                 "ok": True,
                 "state": lobby.state,
@@ -2140,6 +2179,16 @@ class ARCShooterGamePlugin(Plugin):
                 player.send_message(self._t("START_NEED_SPAWNS"))
             return
         # 分配后复核出生点等
+        # 模式在这时才定下来（quick 建房是随机模式），所以**这里**是唯一
+        # 能确定"这局到底是团队死斗还是个人死斗"的地方——打一条出来，
+        # 服主问"怎么还是红蓝队"时直接看日志，不用猜。
+        self._safe_log(
+            "info",
+            f"[ARCShooterGame] 对局开始：房间 {lobby.lobby_id} "
+            f"地图={self._lobby_map_label(lobby)} "
+            f"模式={self._lobby_mode_label(lobby)} "
+            f"人数={lobby.player_count()}",
+        )
         ok, reason = lobby.can_start()
         if not ok:
             if lobby.prefer_random_map:
@@ -3163,6 +3212,48 @@ class ARCShooterGamePlugin(Plugin):
         self._notify_match_settlement(lobby, winner, score_a, score_b)
         self.lobbies.pop(lobby.lobby_id, None)
 
+    def _settlement_text(
+        self,
+        lobby: Lobby,
+        ps: Any,
+        winner: Optional[str],
+        score_a: int,
+        score_b: int,
+    ) -> str:
+        """结算文案按**收件人视角**写：自己这边叫"我们"，对面叫"对面"。
+
+        为什么不用队名（红队/蓝队）：那是系统视角的标签，真人聊天里没人
+        这么说——打完顶多说"对面也太菜了""我们还是牛啊""ez"。而且队名会随
+        地图配置变（红队/蓝队/玩家…），假人照抄系统文案就会在公屏喊
+        "红队"，一眼假。服主 2026-11-18 明确要求改用
+        我们/对面/你们/咱们这类自然称呼。
+
+        所以这段文案**按每个收件人各生成一份**：自己队的分数在前，
+        对方叫"对面"，赢的一方在文案里也会跟着变（"我们赢了"/
+        "对面赢了"）。
+        """
+        if lobby.active_mode == "ffa":
+            # 个人死斗：winner 是玩家名，播报个人战绩（没有队伍概念）。
+            winner_ps = next(
+                (p for p in lobby.result_rows() if p.name == winner), None
+            ) if winner else None
+            if winner_ps is not None:
+                return (f"枪战个人死斗结束：{winner_ps.name} 以 "
+                        f"{winner_ps.kills} 杀获胜。")
+            if winner is not None:
+                return f"枪战个人死斗结束：{winner} 获胜。"
+            return "枪战个人死斗结束：平局，无人获胜。"
+        my_team = str(getattr(ps, "team", "") or "")
+        if my_team == TEAM_B:
+            mine, theirs = score_b, score_a
+        else:
+            mine, theirs = score_a, score_b
+        if winner is None:
+            return f"枪战比赛结束：我们 {mine} 比 {theirs} 对面，打平了。"
+        if winner == my_team:
+            return f"枪战比赛结束：我们 {mine} 比 {theirs} 对面，我们赢了。"
+        return f"枪战比赛结束：我们 {mine} 比 {theirs} 对面，对面赢了。"
+
     def _notify_match_settlement(self, lobby: Lobby, winner: Optional[str],
                                   score_a: int, score_b: int) -> None:
         """一局结束 → 告诉假人"打完了"，让它们在赛后说一句。
@@ -3182,27 +3273,9 @@ class ARCShooterGamePlugin(Plugin):
             notify = getattr(afp, "api_environment_event", None)
             if not callable(notify):
                 return
-            a_name = lobby.team_name(TEAM_A)
-            b_name = lobby.team_name(TEAM_B)
-            if lobby.active_mode == "ffa":
-                # 个人死斗：winner 是玩家名，播报个人战绩
-                winner_ps = next(
-                    (p for p in lobby.result_rows() if p.name == winner), None
-                ) if winner else None
-                if winner_ps is not None:
-                    text = (f"枪战个人死斗结束：{winner_ps.name} 以 "
-                            f"{winner_ps.kills} 杀获胜。")
-                elif winner is not None:
-                    text = f"枪战个人死斗结束：{winner} 获胜。"
-                else:
-                    text = "枪战个人死斗结束：平局，无人获胜。"
-            elif winner is None:
-                text = f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，打平了。"
-            else:
-                text = (f"枪战比赛结束：{a_name} {score_a} 比 {score_b} {b_name}，"
-                        f"{lobby.team_name(winner)}赢了。")
             for ps in lobby.result_rows():
                 name = ps.name
+                text = self._settlement_text(lobby, ps, winner, score_a, score_b)
                 try:
                     notify(name, text, True)
                 except TypeError:

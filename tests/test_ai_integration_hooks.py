@@ -66,10 +66,12 @@ class _Logger:
 
 
 class _Player:
-    def __init__(self, name, xuid=""):
+    def __init__(self, name, xuid="", team="a"):
         self.name = name
         self.xuid = xuid
         self.kills = 0  # 个人死斗结算文案要读
+        # 结算文案按**收件人视角**写"我们/对面"，得知道这人属哪队
+        self.team = team
 
 
 class _FakeAfp:
@@ -116,11 +118,14 @@ class _FakeLobby:
     """够用的大厅替身：只提供被测方法用到的那几个成员。"""
 
     def __init__(self, lobby_id="L1", names=("bot1", "bot2"), winner=None,
-                 mode="tdm"):
+                 mode="tdm", teams=None):
         self.lobby_id = lobby_id
         self._names = list(names)
         self._winner = winner
         self._mode = mode
+        # 每人所属队伍（默认全在 A 队）。结算文案按视角写"我们/对面"，
+        # 这里要能把 A 队和 B 队的人区分出来。
+        self._teams = dict(teams or {})
 
     @property
     def active_mode(self):
@@ -128,13 +133,14 @@ class _FakeLobby:
         return self._mode
 
     def team_name(self, team_id):
-        return "红队" if team_id == "A" else "蓝队"
+        return "红队" if team_id == "a" else "蓝队"
 
     def result_rows(self):
         # 缓存同一批对象：真实 Lobby 的 result_rows 每次返回同一批
         # PlayerState，调用方设置的 kills 在下次读取时仍可见
         if getattr(self, "_rows", None) is None:
-            self._rows = [_Player(n) for n in self._names]
+            self._rows = [_Player(n, team=self._teams.get(n, "a"))
+                          for n in self._names]
         return list(self._rows)
 
 
@@ -207,11 +213,42 @@ class MatchSettlementHookTests(unittest.TestCase):
     def test_result_text_mentions_winner(self):
         afp = _FakeAfp()
         plug = _make_plugin(afp)
-        plug._notify_match_settlement(_FakeLobby(names=("bot1",)), "A", 10, 4)
+        plug._notify_match_settlement(_FakeLobby(names=("bot1",)), "a", 10, 4)
         text = afp.event_calls[0][1]
         self.assertIn("10", text)
         self.assertIn("4", text)
-        self.assertIn("红队", text)
+        self.assertIn("我们赢了", text)
+
+    def test_settlement_text_never_says_team_names(self):
+        """⚠️ 回归护栏：结算文案不许出现"红队/蓝队"。
+
+        服主 2026-11-18：打完在公屏喊"红队"一眼假——真人只会说
+        "对面也太菜了""我们还是牛啊""ez"。假人照抄系统文案就会露馅。
+        队名还会随地图配置变（红队/蓝队/玩家…），照抄更不自然。
+        """
+        afp = _FakeAfp()
+        plug = _make_plugin(afp)
+        plug._notify_match_settlement(
+            _FakeLobby(names=("bot1", "bot2"),
+                       teams={"bot1": "a", "bot2": "b"}),
+            "a", 10, 4)
+        for _name, text, _settlement in afp.event_calls:
+            self.assertNotIn("红队", text)
+            self.assertNotIn("蓝队", text)
+
+    def test_settlement_text_is_per_player_perspective(self):
+        """同一局的 A 队和 B 队拿到的文案不同，且自己的分数在前。"""
+        afp = _FakeAfp()
+        plug = _make_plugin(afp)
+        plug._notify_match_settlement(
+            _FakeLobby(names=("bot1", "bot2"),
+                       teams={"bot1": "a", "bot2": "b"}),
+            "a", 10, 4)
+        texts = {name: text for name, text, _settlement in afp.event_calls}
+        self.assertIn("我们赢了", texts["bot1"])          # A 队赢了
+        self.assertIn("对面赢了", texts["bot2"])          # B 队输了
+        self.assertIn("我们 10 比 4 对面", texts["bot1"])
+        self.assertIn("我们 4 比 10 对面", texts["bot2"])  # 自己的分在前
 
     def test_draw_result_text(self):
         afp = _FakeAfp()
