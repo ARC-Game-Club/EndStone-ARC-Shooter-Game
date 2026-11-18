@@ -14,6 +14,14 @@ from .graph import NavGraph
 
 _SQRT2 = 2.0 ** 0.5
 
+#: 单次 A* 的展开预算上限（节点数）。超了就当这条路走不通。
+#:
+#: ⚠️ 这个上限**几乎不可能被触发**：`closed[]` 保证每个节点最多展开一次，
+#: 所以展开数 ≤ 图的节点数。实测两张图分别 3586 / 47467 节点，离 20 万
+#: 差着两个数量级。之前"超预算"和"真不可达"共用一句文案，把人引到了
+#: 错误的方向（2026-11-18 服主问"怎么经常不可达了"）。
+DEFAULT_MAX_EXPANSIONS = 200_000
+
 
 def _octile(dx: int, dz: int) -> float:
     dx, dz = abs(dx), abs(dz)
@@ -23,8 +31,9 @@ def _octile(dx: int, dz: int) -> float:
 
 
 def astar(graph: NavGraph, start: int, goal: int,
-          max_expansions: int = 200_000, *,
-          cost_scale=None, node_penalty=None) -> Optional[List[int]]:
+          max_expansions: int = DEFAULT_MAX_EXPANSIONS, *,
+          cost_scale=None, node_penalty=None,
+          stats: Optional[dict] = None) -> Optional[List[int]]:
     """节点下标最短路。返回路径节点序列（含首尾）；不可达/超预算返回 None。
 
     路径多样性的两个钩子（都不填 = 原版确定性最短路，行为不变）：
@@ -35,11 +44,26 @@ def astar(graph: NavGraph, start: int, goal: int,
     * ``node_penalty(nxt) -> float``——进入该节点的附加代价（≥0）。
       NavService 用它做拥堵热度：别人刚走过的走廊加价，后面的 AI
       自动换支路。
+
+    ``stats``（可选 dict，out 参数）——填失败原因，调用方好写日志：
+
+    * ``stats["reason"]``：``"ok"`` / ``"budget"``（展开超预算）/
+      ``"unreachable"``（堆空了还没到＝真的走不通，含单向边）。
+    * ``stats["expansions"]``：实际展开的节点数。
+
+    ⚠️ "超预算"和"真不可达"以前共用一句"不可达（分量断开或只有单向
+    跳崖边）"，排查时被带偏过（2026-11-18）。现在分开报。
     """
+    if stats is not None:
+        stats.clear()
+        stats["reason"] = "unreachable"
+        stats["expansions"] = 0
     n = len(graph.nodes)
     if not (0 <= start < n and 0 <= goal < n):
         return None
     if start == goal:
+        if stats is not None:
+            stats["reason"] = "ok"
         return [start]
     gx, _, gz = graph.nodes[goal]
 
@@ -62,9 +86,15 @@ def astar(graph: NavGraph, start: int, goal: int,
                 cur = came[cur]
                 path.append(cur)
             path.reverse()
+            if stats is not None:
+                stats["reason"] = "ok"
+                stats["expansions"] = expansions
             return path
         expansions += 1
         if expansions > max_expansions:
+            if stats is not None:
+                stats["reason"] = "budget"
+                stats["expansions"] = expansions
             return None
         cx, _, cz = graph.nodes[cur]
         for k in range(graph.offsets[cur], graph.offsets[cur + 1]):
@@ -80,6 +110,9 @@ def astar(graph: NavGraph, start: int, goal: int,
                 g[nxt] = ng
                 came[nxt] = cur
                 heapq.heappush(heap, (ng + _octile(nx - gx, nz - gz), nxt))
+    if stats is not None:
+        stats["reason"] = "unreachable"
+        stats["expansions"] = expansions
     return None
 
 

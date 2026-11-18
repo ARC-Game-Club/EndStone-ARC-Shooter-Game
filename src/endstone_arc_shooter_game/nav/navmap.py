@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .astar import astar
+from .astar import DEFAULT_MAX_EXPANSIONS, astar
 from .blocks_v1 import load_map
 from .graph import build_graph, label_components
 from .standable import all_standables
@@ -50,7 +50,8 @@ class _LoadedNav:
     """一张图烘焙后的内存形态。"""
 
     __slots__ = ("map_id", "nodes", "grounds", "offsets", "targets",
-                 "component", "index", "by_col", "stats")
+                 "component", "index", "by_col", "stats",
+                 "component_count", "top_components", "island_nodes")
 
     def __init__(self, map_id: str, nodes, grounds, offsets, targets,
                  component, stats) -> None:
@@ -67,6 +68,18 @@ class _LoadedNav:
         for i, (x, _y, z) in enumerate(nodes):
             by_col.setdefault((x, z), []).append(i)
         self.by_col = by_col
+        # —— 孤岛统计（2026-11-18）——
+        #
+        # 烘焙图里"走不通"的地方一目了然：连通分量数 + 每个分量多大。
+        # 实测炼狱小镇 47467 个节点分成 258 块，最大一块只占 78.4%，
+        # 剩下 21.6%（一万多个节点）是孤岛——AI 走进去就出不来。
+        # 这个统计直接进 api_nav_status，服主不用再翻 nav.json。
+        from collections import Counter
+        comp_sizes = Counter(component)
+        self.component_count = len(comp_sizes)
+        self.top_components = comp_sizes.most_common(8)
+        biggest = comp_sizes.most_common(1)[0][1] if comp_sizes else 0
+        self.island_nodes = max(0, len(nodes) - biggest)
 
     def out_degree(self, i: int) -> int:
         return self.offsets[i + 1] - self.offsets[i]
@@ -317,16 +330,53 @@ class NavService:
                 return {"ok": False, "text": f"api_request_path: 终点 {goal} 附近无站立点", "path": []}
             now = time.monotonic()
             heat = self._heat.setdefault(map_id, {})
+            astat: Dict[str, Any] = {}
             path = astar(
                 nav, s, t,
+                max_expansions=DEFAULT_MAX_EXPANSIONS,
                 cost_scale=self._make_scale(nav),
                 node_penalty=self._make_penalty(heat, now, requester),
+                stats=astat,
             )
             if path is None:
+                # —— 失败原因分三类（2026-11-18）——
+                #
+                # 以前一律报"不可达（分量断开或只有单向跳崖边）"，把三种
+                # 完全不同的病混成一句，排查时被带偏（服主："怎么经常不可
+                # 达了，是不是多样性寻路有问题"——实测不是，是图本身断开）。
+                # 现在:
+                #   budget        —— A* 展开超预算（图太大）。实测两张图
+                #                     3586 / 47467 节点，离 20 万预算差两个
+                #                     数量级，基本不会发生。
+                #   component_split —— 起终点分属不同连通分量：两块区域之
+                #                     间根本没有连起来的路（地图有孤岛）。
+                #   oneway        —— 同在个分量，但边是有向的（跳崖/单向
+                #                     通道），这个方向走不通。
+                sc = nav.component[s]
+                tc = nav.component[t]
+                reason = astat.get("reason", "unreachable")
+                if reason == "budget":
+                    kind = "budget"
+                    detail = (f"A* 展开超预算（>{DEFAULT_MAX_EXPANSIONS} 节点）"
+                              f"，图太大，换条近路或重烘")
+                elif sc != tc:
+                    kind = "component_split"
+                    detail = (f"分属不同连通分量（起点 #{sc}，目标 #{tc}），"
+                              f"两块区域之间没有连起来的路")
+                else:
+                    kind = "oneway"
+                    detail = (f"同在连通分量 #{sc}，但这条路是单向的"
+                              f"（跳崖/单向通道），这个方向走不通")
                 return {"ok": False,
-                        "text": f"api_request_path: {nav.nodes[s]} → {nav.nodes[t]} 不可达"
-                                f"（分量断开或只有单向跳崖边）",
-                        "path": []}
+                        "text": f"api_request_path: {nav.nodes[s]} → {nav.nodes[t]} "
+                                f"不可达：{detail}",
+                        "path": [],
+                        "reason": kind,
+                        "start_component": sc,
+                        "goal_component": tc,
+                        "start_node": list(nav.nodes[s]),
+                        "goal_node": list(nav.nodes[t]),
+                        "expansions": astat.get("expansions", 0)}
             self._stamp_heat(heat, path, now, requester)
             return {"ok": True, "text": f"{len(path)} 路径点",
                     "path": [list(nav.nodes[i]) for i in path]}
@@ -386,8 +436,16 @@ class NavService:
             maps_info = []
             for mid in ids:
                 if mid in self._cache:
-                    st = dict(self._cache[mid].stats)
-                    st.update({"map_id": mid, "state": "已烘焙"})
+                    nav = self._cache[mid]
+                    st = dict(nav.stats)
+                    st.update({"map_id": mid, "state": "已烘焙",
+                               "nodes": len(nav.nodes),
+                               "components": nav.component_count,
+                               "island_nodes": nav.island_nodes,
+                               "island_pct": (round(100.0 * nav.island_nodes
+                                                   / len(nav.nodes), 1)
+                                              if nav.nodes else 0.0),
+                               "top_components": nav.top_components})
                 elif self._nav_dir.joinpath(f"{mid}.nav.json").exists():
                     st = {"map_id": mid, "state": "有缓存（未加载）"}
                 elif self._blocks_path(mid) is not None:
