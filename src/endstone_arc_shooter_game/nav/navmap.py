@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .astar import DEFAULT_MAX_EXPANSIONS, astar
 from .blocks_v1 import load_map
-from .graph import build_graph, label_components
+from .graph import DEFAULT_MAX_DOWN, DEFAULT_MAX_UP, build_graph, label_components
 from .standable import all_standables
 
 NAV_FORMAT = "nav-v1"
@@ -89,7 +89,9 @@ class NavService:
     """导航网格服务。插件持有单例，所有方法主线程调用。"""
 
     def __init__(self, data_dir: Path, logger: Any,
-                 bundled_dir: Optional[Path] = None) -> None:
+                 bundled_dir: Optional[Path] = None, *,
+                 max_up: int = DEFAULT_MAX_UP,
+                 max_down: int = DEFAULT_MAX_DOWN) -> None:
         self._data_dir = Path(data_dir)
         self._nav_dir = self._data_dir / "nav"
         self._maps_dir = self._nav_dir / "maps"
@@ -100,6 +102,11 @@ class NavService:
         self._failed: Dict[str, str] = {}
         #: map_id → {节点下标: (标记时刻, 请求者名)}——拥堵热度
         self._heat: Dict[str, Dict[int, tuple]] = {}
+        #: 连通性规则（向上最多跳几格 / 向下最多摔几格）——可配置
+        #: （settings.yml 的 NAV_MAX_UP / NAV_MAX_DOWN）。改完**自动重烘**：
+        #: 烘焙产物里记着当时的规则，对不上就当缓存失效重烘一遍。
+        self.max_up = int(max_up)
+        self.max_down = int(max_down)
 
     # ------------------------------------------------------------------
     # 装填 / 烘焙
@@ -183,7 +190,8 @@ class NavService:
         standables = all_standables(bmap)
         nodes = [p for p, _ in standables]
         grounds = [n for _, n in standables]
-        graph = build_graph(bmap, nodes, grounds)
+        graph = build_graph(bmap, nodes, grounds,
+                            max_up=self.max_up, max_down=self.max_down)
         n_comp = label_components(graph)
         from collections import Counter
         comp_sizes = Counter(graph.component)
@@ -211,7 +219,8 @@ class NavService:
                 "format": NAV_FORMAT, "map_id": nav.map_id,
                 "baked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "source_exported_at": bmap.exported_at,
-                "rule": {"max_up": 1, "max_down": 5, "neighbors": 8},
+                "rule": {"max_up": self.max_up, "max_down": self.max_down,
+                         "neighbors": 8},
                 "nodes": [list(p) for p in nav.nodes],
                 "grounds": nav.grounds,
                 "edges": {"offsets": nav.offsets, "targets": nav.targets},
@@ -230,6 +239,15 @@ class NavService:
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
             if d.get("format") != NAV_FORMAT:
+                return False
+            # 规则对不上 → 缓存作废，重烘一遍（2026-11-18）。
+            # 落差上限改了却还用老图，就是"改了设置没反应"。
+            rule = d.get("rule") or {}
+            if (int(rule.get("max_up", -1)) != self.max_up
+                    or int(rule.get("max_down", -1)) != self.max_down):
+                self._logger.info(
+                    f"导航缓存规则已变（max_up {rule.get('max_up')}→{self.max_up}, "
+                    f"max_down {rule.get('max_down')}→{self.max_down}），重烘 {map_id}")
                 return False
             nav = _LoadedNav(map_id,
                              [tuple(p) for p in d["nodes"]], list(d["grounds"]),

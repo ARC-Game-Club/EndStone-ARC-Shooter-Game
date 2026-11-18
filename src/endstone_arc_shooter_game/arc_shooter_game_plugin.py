@@ -393,11 +393,21 @@ class ARCShooterGamePlugin(Plugin):
             from pathlib import Path as _P
             bundled = _P(__file__).resolve().parent / "nav" / "maps"
             data_dir = _P(getattr(self, "data_folder", "plugins/ARCShooterGame"))
+            # 连通性规则：向上最多跳几格 / 向下最多摔几格。
+            # 落差上限**可配置**（2026-11-18）：枪战服是 peaceful 难度，
+            # 摔落不掉血，原来写死的 5 格（"落地没伤害"，那是 hard 难度
+            # 生存服的要求）把大片走得到的地方切成了孤岛 → AI 站着不动。
+            # 改完自动重烘（烘焙产物里记着当时的规则）。
+            max_up = self._nav_rule_int("NAV_MAX_UP", 1)
+            max_down = self._nav_rule_int("NAV_MAX_DOWN", 10)
             self.nav = NavService(data_dir, getattr(self, "logger", None),
-                                  bundled_dir=bundled)
+                                  bundled_dir=bundled,
+                                  max_up=max_up, max_down=max_down)
             n = self.nav.install_bundled()
             if n:
                 self._safe_log("info", f"[ARCShooterGame] 导航基线装填 {n} 张")
+            self._safe_log("info", f"[ARCShooterGame] 导航连通性规则 "
+                                   f"max_up={max_up} max_down={max_down}")
         except Exception as e:
             self.nav = None
             self._safe_log("warning", f"[ARCShooterGame] nav service init failed: {e}")
@@ -1360,6 +1370,22 @@ class ARCShooterGamePlugin(Plugin):
             assert self.config_store is not None
             v = self.config_store.settings.GetSettingInt(key)
             return default if v is None else int(v)
+        except Exception:
+            return default
+
+    def _nav_rule_int(self, key: str, default: int) -> int:
+        """读导航连通性规则的整数；没配过就把默认值写回 settings.yml。
+
+        写回去是有意的：settings.yml 里能直接看到"现在生效的落差上限
+        是多少"，改完重启自动重烘——不用翻代码猜。
+        """
+        try:
+            assert self.config_store is not None
+            raw = self.config_store.settings.GetSetting(key)
+            if raw is None or str(raw).strip() == "":
+                self.config_store.settings.SetSetting(key, default)
+                return default
+            return int(float(raw))
         except Exception:
             return default
 

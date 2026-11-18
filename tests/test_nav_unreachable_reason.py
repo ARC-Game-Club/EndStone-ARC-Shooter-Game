@@ -36,13 +36,19 @@ class _Log:
     error = warning
 
 
-def write_nav(path: Path, map_id: str, nodes, offsets, targets, component) -> None:
-    """手写一张 nav-v1 图（绕开 blocks-v1，直接给节点/边/分量）。"""
+def write_nav(path: Path, map_id: str, nodes, offsets, targets, component,
+              max_up: int = 1, max_down: int = 10) -> None:
+    """手写一张 nav-v1 图（绕开 blocks-v1，直接给节点/边/分量）。
+
+    ⚠️ 必须带上 ``rule``：插件发现烘焙产物里的规则与当前设置对不上就
+    会当缓存作废重烘（2026-11-18 改的自动重烘机制），不带就等于
+    "缓存已失效" → 去找 blocks-v1 地形 → 找不到 → 抛错。
+    """
     payload = {
         "format": "nav-v1", "map_id": map_id,
         "baked_at": "2026-11-18T00:00:00",
         "source_exported_at": "2026-11-18T00:00:00",
-        "rule": {"max_up": 1, "max_down": 5, "neighbors": 8},
+        "rule": {"max_up": max_up, "max_down": max_down, "neighbors": 8},
         "nodes": [list(n) for n in nodes],
         "grounds": ["stone"] * len(nodes),
         "edges": {"offsets": list(offsets), "targets": list(targets)},

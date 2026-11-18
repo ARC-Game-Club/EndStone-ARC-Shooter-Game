@@ -37,6 +37,30 @@ NEIGHBORS = ORTHOGONAL + DIAGONAL
 MAX_UP = 1     # 只能跳一格
 MAX_DOWN = 5   # 5 格落地无伤害
 
+#: 枪战服（和平难度）实际使用的落差上限（2026-11-18）。
+#:
+#: ⚠️ **为什么不是 5**（这条规格来自生存服场景，枪战服不适用）：
+#: `MAX_DOWN=5` 的原话理由是"5 格内落地没有伤害"——那是 **hard 难度**
+#: 生存服的诉求（假人摔死是大事）。但枪战服 `difficulty=peaceful`，
+#: **摔落一点血都不掉**，用 5 当连通性判据纯属过度保守：
+#:
+#:   实测（重建整张图，炼狱小镇 47467 节点）：
+#:     MAX_DOWN=5  → 258 个连通分量，孤岛 10262 节点（21.6%）
+#:     MAX_DOWN=8  → 179 个分量，孤岛 6134（12.9%）
+#:     MAX_DOWN=10 → 152 个分量，孤岛 5119（10.8%）
+#:     MAX_DOWN=12 → 132 个分量，孤岛 5037（10.6%）
+#:   harbor（3586 节点）：5 → 26 个分量/孤岛 14.8%；10 → 10 个/孤岛 2.8%
+#:
+#: 那些"孤岛"其实都是**同一张图里走下 6~8 格坎就能到的地方**（实测
+#: 炼狱小镇 #50 的 323 个节点与主分量**在同一列 (x,z)**，只差 6~8 格高），
+#: 现实里走下坡就到，图里却被这条规则切断了 —— 表现就是 AI 站着不动、
+#: 日志刷"不可达"。
+#:
+#: 现在做成**可配置**（settings.yml 的 `NAV_MAX_DOWN` / `NAV_MAX_UP`），
+#: 改完自动重烘，不用重新发版。
+DEFAULT_MAX_UP = 1
+DEFAULT_MAX_DOWN = 10
+
 
 @dataclass
 class NavGraph:
@@ -78,10 +102,15 @@ def _air(bmap: BlockMap, x: int, y: int, z: int) -> bool:
 
 def build_graph(bmap: BlockMap,
                 nodes: List[Tuple[int, int, int]],
-                grounds: List[str]) -> NavGraph:
+                grounds: List[str], *,
+                max_up: int = MAX_UP,
+                max_down: int = MAX_DOWN) -> NavGraph:
     """由站立点列表建 8 邻接导航图。
 
     nodes/grounds 来自 standable.all_standables()（(z,x,y) 序）。
+
+    ``max_up`` / ``max_down`` 是连通性规则（可配置，见 DEFAULT_MAX_DOWN
+    的说明）：向上最多跳几格、向下最多能摔几格。
     """
     column_index: Dict[Tuple[int, int], List[int]] = {}
     for i, (x, _y, z) in enumerate(nodes):
@@ -99,7 +128,7 @@ def build_graph(bmap: BlockMap,
             for j in col:
                 _, ny, _ = nodes[j]
                 dy = ny - y
-                if dy > MAX_UP or dy < -MAX_DOWN:
+                if dy > max_up or dy < -max_down:
                     continue
                 # 脚位可能带 .5（半砖/楼梯）——格子级检查一律用 floor 取整格
                 yi, nyi = int(y), int(ny)
