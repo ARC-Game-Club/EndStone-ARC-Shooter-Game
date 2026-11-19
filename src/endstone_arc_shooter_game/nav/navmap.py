@@ -20,7 +20,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .astar import DEFAULT_MAX_EXPANSIONS, astar
 from .blocks_v1 import load_map
-from .graph import DEFAULT_MAX_DOWN, DEFAULT_MAX_UP, build_graph, label_components
+from .graph import (DEFAULT_MAX_DOWN, DEFAULT_MAX_UP, build_graph,
+                   label_components, label_strong_components)
 from .standable import all_standables
 
 NAV_FORMAT = "nav-v1"
@@ -51,10 +52,11 @@ class _LoadedNav:
 
     __slots__ = ("map_id", "nodes", "grounds", "offsets", "targets",
                  "component", "index", "by_col", "stats",
-                 "component_count", "top_components", "island_nodes")
+                 "component_count", "top_components", "island_nodes",
+                 "scc", "scc_count", "biggest_scc_size")
 
     def __init__(self, map_id: str, nodes, grounds, offsets, targets,
-                 component, stats) -> None:
+                 component, stats, scc=None) -> None:
         self.map_id = map_id
         self.nodes = nodes            # [(x, y, z), ...] 脚部坐标
         self.grounds = grounds        # [脚下方块短名, ...]
@@ -80,6 +82,22 @@ class _LoadedNav:
         self.top_components = comp_sizes.most_common(8)
         biggest = comp_sizes.most_common(1)[0][1] if comp_sizes else 0
         self.island_nodes = max(0, len(nodes) - biggest)
+        # —— 强连通（互相可达）统计（2026-11-19）——
+        #
+        # 弱连通把"只能往下跳、爬不回去"的单向落差边也算连通，于是屋顶
+        # 平台会被算进主城区那块大分量里 —— 死斗复活点就是这么刷到房顶
+        # 上的（炼狱小镇：弱连通最大块 42348 节点，强连通最大块 16735）。
+        # 服主的口径是"互相可达才算连通"，复活点改按强连通采样。
+        if scc is None:
+            self.scc = []
+            self.scc_count = 0
+            self.biggest_scc_size = 0
+        else:
+            self.scc = list(scc)
+            scc_sizes = Counter(self.scc)
+            self.scc_count = len(scc_sizes)
+            self.biggest_scc_size = (scc_sizes.most_common(1)[0][1]
+                                     if scc_sizes else 0)
 
     def out_degree(self, i: int) -> int:
         return self.offsets[i + 1] - self.offsets[i]
@@ -193,8 +211,12 @@ class NavService:
         graph = build_graph(bmap, nodes, grounds,
                             max_up=self.max_up, max_down=self.max_down)
         n_comp = label_components(graph)
+        # 强连通（互相可达）——复活点采样按它筛，详见 label_strong_components
+        scc = label_strong_components(graph)
         from collections import Counter
         comp_sizes = Counter(graph.component)
+        scc_sizes = Counter(scc)
+        biggest_scc = scc_sizes.most_common(1)[0][1] if scc_sizes else 0
         loaded = _LoadedNav(map_id, nodes, grounds, graph.offsets, graph.targets,
                             graph.component, {
                                 "standables": len(nodes),
@@ -202,9 +224,12 @@ class NavService:
                                 "components": n_comp,
                                 "biggest_component_pct": round(
                                     100.0 * comp_sizes.most_common(1)[0][1] / len(nodes), 1) if nodes else 0.0,
+                                "scc_components": len(scc_sizes),
+                                "biggest_scc_pct": round(
+                                    100.0 * biggest_scc / len(nodes), 1) if nodes else 0.0,
                                 "block_count": 0,
                                 "bake_ms": round((time.perf_counter() - t0) * 1000),
-                            })
+                            }, scc=scc)
         self._cache[map_id] = loaded
         self._failed.pop(map_id, None)
         self._write_nav_file(nav_path, loaded, bmap)
@@ -225,6 +250,7 @@ class NavService:
                 "grounds": nav.grounds,
                 "edges": {"offsets": nav.offsets, "targets": nav.targets},
                 "component": nav.component,
+                "scc": nav.scc,
                 "stats": nav.stats,
             }
             tmp = path.with_suffix(".json.tmp")
@@ -249,10 +275,45 @@ class NavService:
                     f"导航缓存规则已变（max_up {rule.get('max_up')}→{self.max_up}, "
                     f"max_down {rule.get('max_down')}→{self.max_down}），重烘 {map_id}")
                 return False
+            # 老缓存没有强连通分量 → **现场用文件里的边算一遍**（不用重烘：
+            # 节点和 CSR 边都在文件里，强连通分量完全可以推出来）。
+            # 只有"连边都没有"才真没法算。
+            scc = d.get("scc")
+            if not scc:
+                # 哪怕一条边都没有也行：Tarjan 会把每个孤立节点算成自己的 SCC
+                from .graph import NavGraph as _NG
+                scc = label_strong_components(_NG(
+                    nodes=[tuple(p) for p in d["nodes"]],
+                    grounds=list(d["grounds"]),
+                    offsets=list(d["edges"]["offsets"]),
+                    targets=list(d["edges"]["targets"]),
+                    component=list(d["component"])))
+                self._logger.info(
+                    f"导航缓存缺强连通分量（老版本烘焙产物），已现场重算 {map_id}")
+                # 算出来的顺手写回文件 → 以后启动直接读，不用每次重算
+                d["scc"] = list(scc)
+                try:
+                    tmp = path.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(d, ensure_ascii=False,
+                                             separators=(",", ":")),
+                                   encoding="utf-8")
+                    tmp.replace(path)
+                except Exception as exc:
+                    self._logger.warning(
+                        f"导航缓存回写强连通分量失败 {path}: {exc}")
+            stats = dict(d.get("stats", {}))
+            if "scc_components" not in stats:
+                from collections import Counter as _C
+                _sz = _C(scc)
+                _big = _sz.most_common(1)[0][1] if _sz else 0
+                _n = len(d["nodes"]) or 1
+                stats["scc_components"] = len(_sz)
+                stats["biggest_scc_pct"] = round(100.0 * _big / _n, 1)
             nav = _LoadedNav(map_id,
                              [tuple(p) for p in d["nodes"]], list(d["grounds"]),
                              d["edges"]["offsets"], d["edges"]["targets"],
-                             list(d["component"]), dict(d.get("stats", {})))
+                             list(d["component"]), stats,
+                             scc=list(scc))
             self._cache[map_id] = nav
             return True
         except Exception as exc:
@@ -459,6 +520,8 @@ class NavService:
                     st.update({"map_id": mid, "state": "已烘焙",
                                "nodes": len(nav.nodes),
                                "components": nav.component_count,
+                               "scc_components": nav.scc_count,
+                               "biggest_scc_nodes": nav.biggest_scc_size,
                                "island_nodes": nav.island_nodes,
                                "island_pct": (round(100.0 * nav.island_nodes
                                                    / len(nav.nodes), 1)

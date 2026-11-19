@@ -192,3 +192,70 @@ def label_components(graph: NavGraph) -> int:
         comp[i] = comp[r]
     graph.component = comp
     return n_comp
+
+
+def label_strong_components(graph: NavGraph) -> List[int]:
+    """强连通分量（Tarjan，迭代版）——"互相可达"才算一整片。
+
+    为什么弱连通不够（2026-11-19 服主质疑后加的）：
+    `label_components` 用并查集**忽略边的方向**，所以"只能往下跳、爬不
+    回去"的单向落差边会把屋顶平台也算进主城区那个大块里。实测炼狱小镇：
+
+        弱连通：152 块，最大 42348 节点（89.2%）
+        强连通：604 块，最大 16735 节点（35.3%）
+
+    现有 64 个死斗复活点里 35 个落在"主城区"以外的小块中——屋顶平台
+    各自成块（61~707 节点），跟街面**不是互相可达的一片**。按弱连通
+    采样就会把人刷到房顶上。
+
+    图是有向的（A→B = "站在 A 能落到 B"），Tarjan 直接吃 CSR 邻接。
+    迭代实现：47k 节点 / 28 万条边，递归版会爆栈。
+    """
+    n = len(graph.nodes)
+    offsets = graph.offsets
+    targets = graph.targets
+    index = [0] * n
+    low = [0] * n
+    on_stack = bytearray(n)
+    stack: List[int] = []
+    comp = [-1] * n
+    counter = 0
+    scc_id = 0
+    for root in range(n):
+        if index[root]:
+            continue
+        # (节点, 邻接游标)
+        work: List[Tuple[int, int]] = [(root, 0)]
+        while work:
+            v, pi = work[-1]
+            if pi == 0:
+                index[v] = low[v] = counter
+                counter += 1
+                stack.append(v)
+                on_stack[v] = 1
+            recursed = False
+            for k in range(offsets[v], offsets[v + 1]):
+                w = targets[k]
+                if index[w] == 0:
+                    work[-1] = (v, k + 1)
+                    work.append((w, 0))
+                    recursed = True
+                    break
+                if on_stack[w] and index[w] < low[v]:
+                    low[v] = index[w]
+            if recursed:
+                continue
+            if low[v] == index[v]:
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = 0
+                    comp[w] = scc_id
+                    if w == v:
+                        break
+                scc_id += 1
+            work.pop()
+            if work:
+                pv = work[-1][0]
+                if low[v] < low[pv]:
+                    low[pv] = low[v]
+    return comp

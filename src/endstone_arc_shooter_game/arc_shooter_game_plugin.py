@@ -76,7 +76,7 @@ from endstone_arc_shooter_game.inventory import (
 from endstone_arc_shooter_game.language import LanguageManager
 from endstone_arc_shooter_game.nav.exporter import TickingAreaMapExporter
 from endstone_arc_shooter_game.nav.navmap import NavService
-from endstone_arc_shooter_game.nav.spawns import compute_ffa_spawn_pool
+from endstone_arc_shooter_game.nav.spawns import compute_ffa_spawn_pool_ex
 from endstone_arc_shooter_game import qq_report
 
 
@@ -3133,7 +3133,7 @@ class ARCShooterGamePlugin(Plugin):
             return False, f"nav_fail:{exc}"
         pool_size = self.config_store.ffa_spawn_pool_size()
         min_spacing = self.config_store.ffa_spawn_min_spacing()
-        spawns = compute_ffa_spawn_pool(
+        spawns, spawn_mode = compute_ffa_spawn_pool_ex(
             nav,
             region_bounds(map_cfg),
             min_spacing=min_spacing,
@@ -3142,6 +3142,12 @@ class ARCShooterGamePlugin(Plugin):
         if not spawns:
             return False, "no_nodes"
         count = len(spawns)
+        # 采样口径写进日志：强连通=互相可达（不会刷到屋顶平台）；弱连通=
+        # 老缓存没有强连通数据时的退路（2026-11-19）。
+        self._safe_log(
+            "info",
+            f"[ARCShooterGame] 个人死斗出生点池重算 {map_id}: {count} 点"
+            f"（口径 {spawn_mode}）")
 
         def updater(entry: Dict[str, Any]) -> None:
             mode_entry = get_mode_config(entry, "ffa")
