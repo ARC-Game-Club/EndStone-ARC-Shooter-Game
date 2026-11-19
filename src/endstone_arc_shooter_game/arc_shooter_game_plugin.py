@@ -261,6 +261,17 @@ class ARCShooterGamePlugin(Plugin):
             "usages": ["/gsreport [target: str] [mode: str]"],
             "permissions": ["arc_shooter_game.command.gs"],
         },
+        # Endstone 0.11.15 起，`execute as @p run <命令>` 转发过来的 sender
+        # **拿不到目标玩家身份**（上游把 ProxiedCommandSender 删了，sender 名字是空串）。
+        # 插件侧只能"线上唯一真人就代他执行"，多真人时无解——所以给一条**显式点名**的命令。
+        # ⚠ `message` 类型必须是**最后一个**参数，而且它会吃掉整行剩余文本
+        #   （Endstone 的 parseNode 对最后一个参数走 "consume all remaining text" 分支），
+        #   所以 `/gsas DEVILENMO gs armory` 的 args 是 ["DEVILENMO", "gs armory"]。
+        "gsas": {
+            "description": "以指定玩家的身份执行一条命令（例：/gsas DEVILENMO gs armory）",
+            "usages": ["/gsas <player: str> <cmd: message>"],
+            "permissions": ["arc_shooter_game.command.gsas"],
+        },
         "addspawn": {
             "description": "把脚下位置加为指定模式的出生点（自动识别所在地图）",
             # ⚠ 占位符必须是纯 ASCII：BDS 解析命令 usage 时遇到非 ASCII
@@ -288,6 +299,10 @@ class ARCShooterGamePlugin(Plugin):
         },
         "arc_shooter_game.command.mapedit": {
             "description": "游戏内快捷编辑地图出生点（/addspawn、/rmspawn）",
+            "default": "op",
+        },
+        "arc_shooter_game.command.gsas": {
+            "description": "以指定玩家身份执行命令（/gsas）",
             "default": "op",
         },
     }
@@ -682,26 +697,92 @@ class ARCShooterGamePlugin(Plugin):
             return True
         return bool(getattr(sender, "is_op", False))
 
+    def _is_console_sender(self, sender: CommandSender) -> bool:
+        """这个 sender 是不是服务器控制台本体。
+
+        控制台 sender 是 `server.command_sender` 这一个**单例对象**，而 execute
+        转发过来的每次都新建一个包装对象——用对象同一性就能把两者分开。
+        """
+        try:
+            console = getattr(self.server, "command_sender", None)
+        except Exception:
+            console = None
+        return console is not None and sender is console
+
+    def _human_players(self) -> list:
+        """在线的**真人**玩家列表。
+
+        判据是 xuid 非空——假人插件的模拟玩家没有 Xbox Live 客户端，xuid 必然是空的
+        （枪战插件自己的 `_is_bot_player` 也是同一判据）。
+        """
+        humans = []
+        for online_player in list(getattr(self.server, "online_players", []) or []):
+            try:
+                xuid = str(getattr(online_player, "xuid", "") or "").strip()
+            except Exception:
+                xuid = ""
+            if xuid:
+                humans.append(online_player)
+        return humans
+
+    def _sole_human_player(self) -> Optional[Player]:
+        """线上**恰好一个**真人时返回他；0 个或多个都返回 None（多真人时无法猜）。"""
+        humans = self._human_players()
+        if len(humans) == 1:
+            return humans[0]
+        return None
+
     def _resolve_player_for_command_sender(self, sender: CommandSender) -> Optional[Player]:
-        """真实玩家直接返回；经 execute 转发时 sender 可能不是 Player 实例，按名字解析在线玩家（与弧光核心一致）。"""
+        """解析命令背后真正的玩家。
+
+        真实玩家直接返回；命令方块/代理按名字解析在线玩家。
+
+        **execute 转发**（`execute as @p run gs armory`）在 Endstone 0.11.15 之后
+        拿不到目标身份：上游 2025-06-22 删掉了 `ProxiedCommandSender`，转发过来的
+        sender 变成基类 `CommandSender`，名字是**空串**（实测 `execute as @p run say x`
+        在日志里显示成 `[] x`，而控制台直连是 `[Server] x`）。
+        这种情况下退一步：线上**只有一个人类玩家**就代他执行；多个真人由调用方提示
+        改用 `/gsas <玩家> <命令>` 显式点名。
+        """
         if isinstance(sender, Player):
             return sender
+        # ① 万一上游把 ProxiedCommandSender 加回来（它带 callee = execute 的目标实体）
+        callee = getattr(sender, "callee", None)
+        if isinstance(callee, Player):
+            return callee
         name = str(getattr(sender, "name", "") or "").strip()
         if "§r" in name:
             name = name.rsplit("§r", 1)[-1]
         name = re.sub(r"§.", "", name).strip()
-        if not name:
+        if name:
+            # ② 命令方块 / 代理 / 控制台（名字是 "Server"）：按名字解析在线玩家
+            try:
+                resolved = self.server.get_player(name)
+                if resolved is not None:
+                    return resolved
+            except Exception:
+                pass
+            for online_player in list(getattr(self.server, "online_players", []) or []):
+                if str(getattr(online_player, "name", "") or "").strip().lower() == name.lower():
+                    return online_player
+            # 名字对不上 → 不是 execute 转发，保持旧行为（提示"只能由玩家使用"）
             return None
+        # ③ 匿名 sender = execute 转发：控制台本体不算，其余按"唯一真人"兜底
+        if self._is_console_sender(sender):
+            return None
+        return self._sole_human_player()
+
+    def _player_only_message(self, sender: CommandSender) -> str:
+        """解析不到玩家时的提示。多真人时给可操作的指引，别只丢一句"只能由玩家使用"。"""
         try:
-            resolved = self.server.get_player(name)
-            if resolved is not None:
-                return resolved
+            name = str(getattr(sender, "name", "") or "").strip()
         except Exception:
-            pass
-        for online_player in list(getattr(self.server, "online_players", []) or []):
-            if str(getattr(online_player, "name", "") or "").strip().lower() == name.lower():
-                return online_player
-        return None
+            name = ""
+        if not name and not self._is_console_sender(sender):
+            humans = self._human_players()
+            if len(humans) > 1:
+                return self._t("CMD_AMBIGUOUS_TARGET").format(len(humans))
+        return self._t("CMD_PLAYER_ONLY")
 
     # ---------- commands ----------
 
@@ -720,6 +801,10 @@ class ARCShooterGamePlugin(Plugin):
         if command.name == "gsreport":
             # 顶层命令（带参数）：/gsreport start on
             self._handle_report_command(sender, list(args))
+            return True
+        if command.name == "gsas":
+            # 顶层命令（带参数）：/gsas DEVILENMO gs armory
+            self._handle_run_as_command(sender, list(args))
             return True
         if command.name != "gs":
             return False
@@ -772,7 +857,7 @@ class ARCShooterGamePlugin(Plugin):
         if not isinstance(sender, Player):
             resolved = self._resolve_player_for_command_sender(sender)
             if resolved is None:
-                sender.send_message(self._t("CMD_PLAYER_ONLY"))
+                sender.send_message(self._player_only_message(sender))
                 return True
             sender = resolved
         # 命令要弹新表单前，先关掉玩家当前打开的表单，否则新表单送不到客户端
@@ -809,9 +894,43 @@ class ARCShooterGamePlugin(Plugin):
         """
         player = self._resolve_player_for_command_sender(sender)
         if player is None:
-            sender.send_message(self._t("CMD_PLAYER_ONLY"))
+            sender.send_message(self._player_only_message(sender))
             return None
         return player
+
+    def _handle_run_as_command(self, sender: CommandSender, args: list[str]) -> None:
+        """`/gsas <玩家> <命令>`：以指定玩家的身份执行一条命令。
+
+        Endstone 0.11.15 起 `execute as @p run ...` 转发过来的 sender 拿不到目标身份
+        （上游删了 ProxiedCommandSender），插件侧只能"唯一真人就代他执行"。
+        线上有多个真人时，用这条命令把身份**显式**点清楚：命令用
+        `Player.perform_command` 以**目标玩家**的身份下发，目标插件收到的
+        sender 就是那个 Player 本体（`isinstance(sender, Player)` 成立）。
+        """
+        if len(args) < 2:
+            sender.send_message(self._t("GSAS_USAGE"))
+            return
+        target_name = str(args[0] or "").strip()
+        cmd_text = " ".join(str(a) for a in args[1:]).strip()
+        if cmd_text.startswith("/"):
+            cmd_text = cmd_text[1:].strip()
+        if not target_name or not cmd_text:
+            sender.send_message(self._t("GSAS_USAGE"))
+            return
+        if cmd_text.split(" ", 1)[0].lower() == "gsas":
+            # 防自递归：/gsas X gsas Y ...
+            sender.send_message(self._t("GSAS_RECURSIVE"))
+            return
+        target = self._get_player(target_name)
+        if target is None:
+            sender.send_message(self._t("GSAS_NO_TARGET").format(target_name))
+            return
+        try:
+            target.perform_command(cmd_text)
+        except Exception as exc:
+            sender.send_message(self._t("GSAS_FAIL").format(exc))
+            return
+        sender.send_message(self._t("GSAS_OK").format(target_name, cmd_text))
 
     def _handle_armory_command(self, sender: CommandSender) -> None:
         """`/gs armory`：直接打开军械库表单，不用先进主菜单。
