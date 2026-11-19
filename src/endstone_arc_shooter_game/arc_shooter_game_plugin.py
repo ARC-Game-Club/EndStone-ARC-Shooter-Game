@@ -239,7 +239,26 @@ class ARCShooterGamePlugin(Plugin):
                 "/gs armory",
                 "/gs bake",
                 "/gs nav",
+                # ⚠️ gs 家族**只能注册两段形式**：BDS 按 usages 建命令语法树，
+                #   多一段就是 "Syntax error: Unexpected ..."（"/gs bake harbor"
+                #   在 2026-11-03 就是这么挂的）。要带参数就用**顶层命令**：
+                #   /ffaspawn [map_id]、/gsreport [target] [mode]。
+                "/gs ffaspawn",
+                "/gs report",
             ],
+            "permissions": ["arc_shooter_game.command.gs"],
+        },
+        # ⚠️ 必须注册成**顶层命令**（和 /addspawn、/connecttoserver 一样）：
+        #   "/gs ffaspawn 炼狱小镇" 这种三段形式在这个 BDS 上注册不出来，
+        #   on_command 里那段分支从来没被执行过。
+        "ffaspawn": {
+            "description": "重算个人死斗出生点池（导航重烘后 / 点位不满意时）",
+            "usages": ["/ffaspawn [map_id: str]"],
+            "permissions": ["arc_shooter_game.command.mapedit"],
+        },
+        "gsreport": {
+            "description": "群消息开关：查状态 / 开 / 关（开局播报、终局战报）",
+            "usages": ["/gsreport [target: str] [mode: str]"],
             "permissions": ["arc_shooter_game.command.gs"],
         },
         "addspawn": {
@@ -691,6 +710,17 @@ class ARCShooterGamePlugin(Plugin):
             return self._handle_quick_spawn_command(sender, command, args)
         if command.name == "setrange":
             return self._handle_setrange_command(sender, command, args)
+        if command.name == "ffaspawn":
+            # 顶层命令（带地图 id）：/ffaspawn 炼狱小镇
+            if not self._is_op(sender):
+                sender.send_message(self._t("CMD_NO_PERMISSION"))
+                return True
+            self._handle_ffaspawn_command(sender, args[0] if args else "")
+            return True
+        if command.name == "gsreport":
+            # 顶层命令（带参数）：/gsreport start on
+            self._handle_report_command(sender, list(args))
+            return True
         if command.name != "gs":
             return False
         sub = args[0].lower() if args else ""
@@ -3160,11 +3190,47 @@ class ARCShooterGamePlugin(Plugin):
         self._sync_lobbies_for_map(map_id)
         return True, f"ok:{count}"
 
+    def _resolve_map_id(self, raw: str) -> str:
+        """把用户给的地图名解析成 map_id。
+
+        服主习惯用显示名叫图（"港口-装卸货场"），而 map_id 可能是英文
+        （harbor）——两种都认，最后再模糊包含一次。
+        """
+        text = str(raw or "").strip()
+        if not text or self.config_store is None:
+            return ""
+        maps = self.config_store.maps
+        if text in maps:
+            return text
+        low = text.lower()
+        for mid in maps:
+            if str(mid or "").lower() == low:
+                return mid
+        for mid, cfg in maps.items():
+            if str((cfg or {}).get("display_name") or "").strip() == text:
+                return mid
+        for mid, cfg in maps.items():
+            name = str((cfg or {}).get("display_name") or "")
+            if name and (text in name or name in text):
+                return mid
+        return ""
+
     def _handle_ffaspawn_command(self, sender: CommandSender, map_id: str) -> None:
-        """`/gs ffaspawn [map_id]`：强制重算个人死斗出生点池。"""
+        """`/ffaspawn [map_id]`：强制重算个人死斗出生点池。
+
+        `/gs ffaspawn`（两段形式）走同一条路：不带地图 id 时按玩家所在的
+        地图算——那是服主在游戏里最常用的形态。
+        """
         assert self.config_store is not None
         map_id = str(map_id or "").strip()
-        if not map_id:
+        if map_id:
+            resolved = self._resolve_map_id(map_id)
+            if not resolved:
+                sender.send_message(self._t("FFA_SPAWN_FAILED").format(
+                    map_id, "map_missing"))
+                return
+            map_id = resolved
+        else:
             player = self._resolve_player_for_command_sender(sender)
             if player is None:
                 sender.send_message(self._t("CMD_PLAYER_ONLY"))
