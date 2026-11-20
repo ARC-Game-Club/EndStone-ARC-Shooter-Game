@@ -732,6 +732,56 @@ class ARCShooterGamePlugin(Plugin):
             return humans[0]
         return None
 
+    def _resolve_player_from_block_sender(self, sender: CommandSender) -> Optional[Player]:
+        """命令方块 → 离方块最近的**真人**玩家。
+
+        踏板 + 命令方块的经典玩法：命令方块里**直接写** `gs armory`，插件自己找
+        "离方块最近的那个玩家"——这就是 BDS `@p` 的意思，但只算真人（假人没有
+        客户端，抢到也看不见界面）。
+
+        坐标拿得到：Endstone 的 `BlockCommandSender` 暴露了 `.block`，`Block`
+        又有 `.location`（x/y/z/dimension）。
+        反过来，`execute as @p run ...` 转发过来的 sender 是匿名包装（什么都拿不到），
+        那种写法只能靠"线上唯一真人"兜底。
+        """
+        block = getattr(sender, "block", None)
+        if block is None:
+            return None
+        loc = getattr(block, "location", None)
+        if loc is None:
+            return None
+        try:
+            block_x = float(loc.x)
+            block_y = float(loc.y)
+            block_z = float(loc.z)
+        except Exception:
+            return None
+        block_dim = dimension_id_of(loc)
+        candidates = []
+        for online_player in list(getattr(self.server, "online_players", []) or []):
+            try:
+                player_loc = getattr(online_player, "location", None)
+                if player_loc is None:
+                    continue
+                if dimension_id_of(player_loc) != block_dim:
+                    continue
+                distance = (
+                    (float(player_loc.x) - block_x) ** 2
+                    + (float(player_loc.y) - block_y) ** 2
+                    + (float(player_loc.z) - block_z) ** 2
+                )
+            except Exception:
+                continue
+            candidates.append((distance, online_player))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        for _distance, online_player in candidates:
+            if not self._is_bot_player(str(getattr(online_player, "name", "") or "")):
+                return online_player
+        # 一个真人都没有：退而求其次给最近的假人（总比不执行强）
+        return candidates[0][1]
+
     def _resolve_player_for_command_sender(self, sender: CommandSender) -> Optional[Player]:
         """解析命令背后真正的玩家。
 
@@ -750,6 +800,11 @@ class ARCShooterGamePlugin(Plugin):
         callee = getattr(sender, "callee", None)
         if isinstance(callee, Player):
             return callee
+        # ② 命令方块（踏板玩法）：按"离方块最近的真人"执行 = BDS @p 的意思。
+        #    这里**直接返回**：命令方块附近没人就是没人，不许再掉到"唯一真人"兜底
+        #    ——否则会把界面开给一个离得老远的无关玩家。
+        if getattr(sender, "block", None) is not None:
+            return self._resolve_player_from_block_sender(sender)
         name = str(getattr(sender, "name", "") or "").strip()
         if "§r" in name:
             name = name.rsplit("§r", 1)[-1]
@@ -778,6 +833,9 @@ class ARCShooterGamePlugin(Plugin):
             name = str(getattr(sender, "name", "") or "").strip()
         except Exception:
             name = ""
+        if getattr(sender, "block", None) is not None:
+            # 命令方块：附近没找到人（或者只有假人）
+            return self._t("CMD_NO_PLAYER_NEARBY")
         if not name and not self._is_console_sender(sender):
             humans = self._human_players()
             if len(humans) > 1:

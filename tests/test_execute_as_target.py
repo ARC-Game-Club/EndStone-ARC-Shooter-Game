@@ -37,16 +37,33 @@ from endstone_arc_shooter_game.arc_shooter_game_plugin import (  # noqa: E402
 from endstone_arc_shooter_game.language import DEFAULT_TEXTS  # noqa: E402
 
 
+class FakeDimension:
+    def __init__(self, dimension_id="overworld"):
+        self.id = dimension_id
+
+
+class FakeLocation:
+    def __init__(self, x, y, z, dimension="overworld"):
+        self.x, self.y, self.z = x, y, z
+        self.dimension = FakeDimension(dimension)
+
+
 class FakePlayer(Player):
     """在线玩家（真人 xuid 非空，假人 xuid 为空）。"""
 
-    def __init__(self, name, xuid=""):
+    def __init__(self, name, xuid="", location=None):
         self.name = name
         self.xuid = xuid
+        self.location = location or FakeLocation(0, 64, 0)
         self.performed = []
 
     def perform_command(self, command):
         self.performed.append(command)
+
+
+class FakeBlock:
+    def __init__(self, x, y, z, dimension="overworld"):
+        self.location = FakeLocation(x, y, z, dimension)
 
 
 class FakeServer:
@@ -77,6 +94,14 @@ class NamedSender(AnonymousSender):
     def __init__(self, name):
         super().__init__()
         self.name = name
+
+
+class BlockSender(AnonymousSender):
+    """命令方块 sender：Endstone 暴露 `.block`，`Block` 暴露 `.location`。"""
+
+    def __init__(self, x=0, y=64, z=0, dimension="overworld"):
+        super().__init__()
+        self.block = FakeBlock(x, y, z, dimension)
 
 
 class FakeLanguageManager:
@@ -132,6 +157,38 @@ class ExecuteAsTargetTests(unittest.TestCase):
         human = FakePlayer("DEVILENMO", "2535")
         plugin = make_plugin([human])
         self.assertIs(plugin._resolve_player_for_command_sender(human), human)
+
+    # ---------- 命令方块（踏板玩法）----------
+
+    def test_block_sender_picks_the_nearest_human(self):
+        """命令方块 → 离方块最近的真人（这就是 BDS `@p` 的意思）。"""
+        near = FakePlayer("NEAR", "1", FakeLocation(3, 64, 0))
+        far = FakePlayer("FAR", "2", FakeLocation(50, 64, 0))
+        plugin = make_plugin([near, far])
+        sender = BlockSender(0, 64, 0)
+        self.assertIs(plugin._resolve_player_for_command_sender(sender), near)
+
+    def test_block_sender_ignores_bots(self):
+        """假人离得更近也不该抢——它没有客户端，抢到也看不见界面。"""
+        bot = FakePlayer("bot_a", "", FakeLocation(1, 64, 0))
+        human = FakePlayer("DEVILENMO", "2535", FakeLocation(20, 64, 0))
+        plugin = make_plugin([bot, human])
+        sender = BlockSender(0, 64, 0)
+        self.assertIs(plugin._resolve_player_for_command_sender(sender), human)
+
+    def test_block_sender_skips_other_dimensions(self):
+        """别的维度的玩家不算距离。"""
+        human = FakePlayer("DEVILENMO", "2535", FakeLocation(1, 64, 0, "nether"))
+        plugin = make_plugin([human])
+        sender = BlockSender(0, 64, 0, "overworld")
+        self.assertIsNone(plugin._resolve_player_for_command_sender(sender))
+
+    def test_block_sender_without_players_gives_clear_message(self):
+        """方块附近没人 → 提示要说清是"附近没人"，不是"只能由玩家使用"。"""
+        plugin = make_plugin([])
+        sender = BlockSender(0, 64, 0)
+        self.assertIsNone(plugin._resolve_player_for_command_sender(sender))
+        self.assertIn("附近没有玩家", plugin._player_only_message(sender))
 
     def test_gsas_is_a_top_level_command(self):
         """/gsas 带参数 → 必须注册成顶层命令（gs 家族只能两段）。"""

@@ -117,6 +117,7 @@ DEFAULT_TEXTS = {
     "CMD_UNKNOWN_SUB": "§7未知子命令：§f{0}§7。可用：/gs、/gs leave、/gs quick、/gs range、/gs armory、/gs bake、/gs nav、/gs ffaspawn、/gs report、/gs reload",
     "CMD_NO_PERMISSION": "§7你没有权限执行此操作。",
     "CMD_AMBIGUOUS_TARGET": "§7无法确定目标玩家：当前有 §f{0}§7 个真人在线。\n§7请显式点名：§f/gsas <玩家名> <命令>",
+    "CMD_NO_PLAYER_NEARBY": "§7命令方块附近没有玩家（只有假人也不算——它们没有客户端）。",
     "GSAS_USAGE": "§7用法：§f/gsas <玩家名> <命令>§7（例：§f/gsas DEVILENMO gs armory§7）",
     "GSAS_RECURSIVE": "§c不能把 gsas 自己套给自己。",
     "GSAS_NO_TARGET": "§c找不到在线玩家：§f{0}",
